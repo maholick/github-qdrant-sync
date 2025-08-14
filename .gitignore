@@ -1,0 +1,113 @@
+# GitHub to Qdrant Vector Processing - .gitignore
+
+# API Keys and Sensitive Configuration Files
+# NEVER commit files containing real API keys!
+config.json
+config_*.json
+!config.json.example
+*.secret.json
+.env
+.env.local
+.env.production
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Generated Markdown Output
+markdown/
+output/
+consolidated/
+test-consolidated/
+test-small/
+
+# Temporary Files and Logs
+*.log
+logs/
+temp/
+tmp/
+*.tmp
+*.temp
+.cache/
+
+# OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.spyderproject
+.spyproject
+
+# Testing and Coverage
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+.nyc_output/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Database files
+*.db
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Local development
+local.json
+test_*.json
+debug_*

@@ -1,0 +1,100 @@
+{
+  "github": {
+    // GitHub repository configuration
+    "repository_url": "https://github.com/your-org/your-repo.git",
+    "branch": "main",                    // Target branch (optional, defaults to main/master)
+    "clone_depth": 1,                    // Shallow clone depth for faster processing
+    "cleanup_after_processing": true,    // Delete temp files after processing
+    "token": null                        // GitHub token for private repos (optional)
+  },
+  
+  // EMBEDDING PROVIDER SELECTION
+  "embedding_provider": "azure_openai",     // Options: "azure_openai", "mistral_ai"
+  
+  "azure_openai": {
+    // Azure OpenAI embedding service configuration
+    "api_key": "your-azure-openai-api-key-here",
+    "endpoint": "https://your-resource.openai.azure.com/",
+    "deployment_name": "text-embedding-3-large",  // Available: text-embedding-ada-002, text-embedding-3-small, text-embedding-3-large
+    "api_version": "2024-02-01"
+  },
+  
+  "mistral_ai": {
+    // Mistral AI embedding service configuration
+    "api_key": "your-mistral-api-key-here",
+    "model": "codestral-embed",            // Options: "mistral-embed" (1024 dim), "codestral-embed" (1536 dim)
+    "output_dimension": 1536,              // For codestral-embed: 1536 (default) up to 3072
+    "api_base": "https://api.mistral.ai/v1"
+  },
+  
+  "qdrant": {
+    // Qdrant vector database configuration
+    "url": "https://your-cluster-id.region.cloud.qdrant.io:6333",
+    "api_key": "your-qdrant-api-key-here",
+    "collection_name": "your-collection-name",
+    "vector_size": 3072,                 // Must match embedding model: ada-002=1536, 3-small=1536, 3-large=3072, mistral-embed=1024, codestral-embed=1536/3072
+    "distance": "Cosine",                // Available: Cosine, Euclidean, Dot
+    "recreate_collection": false         // WARNING: true will delete existing collection!
+  },
+  
+  "processing": {
+    // Document processing and chunking settings
+    "chunk_size": 1000,                  // Characters per chunk (recommended: 500-2000)
+    "chunk_overlap": 200,                // Overlap between chunks for context continuity
+    "markdown_extensions": [".md", ".markdown", ".mdown", ".mkd"],
+    "exclude_patterns": ["node_modules", ".git", "__pycache__", "*.pyc", ".DS_Store"],
+    
+    // OPTIMIZED DEDUPLICATION SETTINGS
+    "deduplication_enabled": true,       // Enable/disable duplicate removal
+    "similarity_threshold": 0.95,        // Higher = more strict (0.9-0.98 recommended)
+    
+    // EMBEDDING GENERATION SETTINGS (OPTIMIZED)
+    "embedding_batch_size": 50,          // Chunks per batch (optimized for Azure OpenAI)
+    "max_retries": 3,                    // Retries for rate limit errors
+    "batch_delay_seconds": 1             // REQUIRED: Delay between batches to avoid Azure 429 errors
+  },
+  
+  "output": {
+    // Local file output settings (for generated markdown)
+    "base_directory": "markdown",
+    "combined_filename": "__combined_markdown.md",
+    "preserve_structure": true
+  },
+  
+  "logging": {
+    // Logging configuration
+    "level": "INFO",                     // DEBUG, INFO, WARNING, ERROR
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  }
+}
+
+/*
+USAGE EXAMPLES:
+
+1. Basic usage with config file:
+   python3 github_to_qdrant.py config.json.example
+
+2. Override repository URL:
+   python3 github_to_qdrant.py config.json.example --repo-url https://github.com/different/repo.git
+
+PERFORMANCE NOTES:
+- embedding_batch_size=50: Optimized for Azure OpenAI (2.5x faster than default 20)
+- batch_delay_seconds=1: REQUIRED to prevent Azure OpenAI rate limit errors
+- similarity_threshold=0.95: Removes near-duplicates while preserving unique content
+- deduplication uses optimized vectorized operations (5-15x faster than old method)
+
+EMBEDDING MODEL DIMENSIONS:
+Azure OpenAI:
+- text-embedding-ada-002: 1536 dimensions
+- text-embedding-3-small: 1536 dimensions  
+- text-embedding-3-large: 3072 dimensions (recommended for best quality)
+
+Mistral AI:
+- mistral-embed: 1024 dimensions (general text)
+- codestral-embed: 1536 dimensions (default) up to 3072 (code-specialized, recommended for technical docs)
+
+SECURITY:
+- Never commit API keys to version control
+- Use environment variables or secure key management
+- Keep GitHub tokens private for private repositories
+*/
