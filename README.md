@@ -320,6 +320,49 @@ This project features **cutting-edge deduplication** that's **5-15x faster** tha
 - Additional VRAM usage for GPU acceleration
 - Faster processing with dedicated GPU
 
+## 📦 Data Structure & Metadata
+
+### 🏗️ Payload Structure
+
+This project uses the **standard LangChain/Qdrant payload structure** for maximum compatibility with existing tools and frameworks. Each document chunk is stored with the following structure:
+
+```json
+{
+  "page_content": "Full document text content here...",
+  "document": "Full document text content here...",
+  "metadata": {
+    "source": "github_repository",
+    "repository": "your-repo-name",
+    "branch": "main",
+    "document_type": "markdown",
+    "chunk_id": 123,
+    "chunk_size": 850,
+    "preview": "First 200 characters of content...",
+    "content_hash": "abc123de",
+    "batch_number": 42,
+    "processed_at": "2025-08-18T12:00:00"
+  }
+}
+```
+
+### 📋 Field Descriptions
+
+- **`page_content`** - Full text content of the document chunk (standard LangChain field)
+- **`document`** - Full document text (MCP server compatibility field at root level)
+- **`metadata.preview`** - 200-character preview for quick inspection and UI display
+- **`metadata.chunk_id`** - Unique identifier for tracking and deduplication
+- **`metadata.source`** - Document source type (e.g., "github_repository")
+- **`metadata.repository`** - Repository name for filtering and organization
+- **`metadata.content_hash`** - MD5 hash for duplicate detection and verification
+
+### ✅ Benefits
+
+- **🔧 Standard Compatible** - Works seamlessly with LangChain, n8n, and most Qdrant clients
+- **🤖 MCP Server Ready** - Includes `document` field for Qdrant MCP server compatibility
+- **💾 Efficient Storage** - Clean separation between standard and compatibility fields
+- **🔍 Easy Filtering** - Structured metadata enables precise search and filtering
+- **📊 Debug Friendly** - Preview field allows quick content inspection without full retrieval
+
 ## 📁 Project Structure
 
 ```

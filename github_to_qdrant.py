@@ -31,6 +31,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 # Mistral AI imports (optional)
 try:
     from mistralai import Mistral
+
     MISTRAL_AVAILABLE = True
 except ImportError:
     Mistral = None
@@ -39,6 +40,7 @@ except ImportError:
 # Sentence Transformers imports (optional)
 try:
     from sentence_transformers import SentenceTransformer
+
     SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
     SentenceTransformer = None
@@ -54,7 +56,9 @@ class MistralEmbeddingClient:
     request formatting, and supports configurable output dimensions for codestral-embed.
     """
 
-    def __init__(self, api_key: str, model: str = "codestral-embed", output_dimension: int = 1536):
+    def __init__(
+        self, api_key: str, model: str = "codestral-embed", output_dimension: int = 1536
+    ):
         """
         Initialize Mistral AI embedding client.
 
@@ -82,7 +86,8 @@ class MistralEmbeddingClient:
 
             response = self.client.embeddings.create(**params)
             return [
-                embedding.embedding for embedding in response.data
+                embedding.embedding
+                for embedding in response.data
                 if embedding.embedding is not None
             ]
 
@@ -98,8 +103,8 @@ class SentenceTransformerClient:
     """
     Sentence Transformers embedding client with batch processing support.
 
-    This class provides a unified interface for generating embeddings using 
-    Sentence Transformers models like all-MiniLM-L6-v2 (384d) and 
+    This class provides a unified interface for generating embeddings using
+    Sentence Transformers models like all-MiniLM-L6-v2 (384d) and
     multilingual-e5-large (1024d). It handles model loading and provides
     consistent embed_documents() and embed_query() methods.
     """
@@ -109,7 +114,7 @@ class SentenceTransformerClient:
         Initialize Sentence Transformers embedding client.
 
         Args:
-            model_name: Model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2', 
+            model_name: Model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2',
                        'intfloat/multilingual-e5-large')
         """
         if not SENTENCE_TRANSFORMERS_AVAILABLE or SentenceTransformer is None:
@@ -119,7 +124,7 @@ class SentenceTransformerClient:
 
         self.model_name = model_name
         self.model = SentenceTransformer(model_name)
-        
+
         # Get embedding dimension
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
 
@@ -133,17 +138,17 @@ class SentenceTransformerClient:
                 embeddings = self.model.encode(prefixed_texts, convert_to_numpy=False)
             else:
                 embeddings = self.model.encode(texts, convert_to_numpy=False)
-            
+
             # Convert numpy arrays/tensors to lists of floats
             result = []
-            if hasattr(embeddings, 'tolist'):
+            if hasattr(embeddings, "tolist"):
                 return embeddings.tolist()
-            
+
             # Handle list of embeddings
             for emb in embeddings:
-                if hasattr(emb, 'tolist'):
+                if hasattr(emb, "tolist"):
                     result.append(emb.tolist())
-                elif hasattr(emb, '__iter__'):
+                elif hasattr(emb, "__iter__"):
                     result.append([float(x) for x in emb])
                 else:
                     result.append(emb)
@@ -159,14 +164,16 @@ class SentenceTransformerClient:
             if "multilingual-e5" in self.model_name.lower():
                 # Add "query:" prefix for better performance with e5 models
                 prefixed_text = f"query: {text}"
-                embedding = self.model.encode([prefixed_text], convert_to_numpy=False)[0]
+                embedding = self.model.encode([prefixed_text], convert_to_numpy=False)[
+                    0
+                ]
             else:
                 embedding = self.model.encode([text], convert_to_numpy=False)[0]
-            
+
             # Convert numpy array/tensor to list of floats
-            if hasattr(embedding, 'tolist'):
+            if hasattr(embedding, "tolist"):
                 return embedding.tolist()
-            elif hasattr(embedding, '__iter__'):
+            elif hasattr(embedding, "__iter__"):
                 return [float(x) for x in embedding]
             else:
                 # Fallback: convert single value to list
@@ -205,21 +212,21 @@ class GitHubToQdrantProcessor:
         print(f"🎯 Target collection: {self.config['qdrant']['collection_name']}")
 
         # Display embedding provider info
-        provider = self.config.get('embedding_provider', 'azure_openai')
-        if provider == 'mistral_ai':
-            model_name = self.config['mistral_ai']['model']
+        provider = self.config.get("embedding_provider", "azure_openai")
+        if provider == "mistral_ai":
+            model_name = self.config["mistral_ai"]["model"]
             print(f"🤖 Using embedding provider: Mistral AI ({model_name})")
-        elif provider == 'sentence_transformers':
-            model_name = self.config['sentence_transformers']['model']
+        elif provider == "sentence_transformers":
+            model_name = self.config["sentence_transformers"]["model"]
             print(f"🤖 Using embedding provider: Sentence Transformers ({model_name})")
         else:
-            model_name = self.config['azure_openai']['deployment_name']
+            model_name = self.config["azure_openai"]["deployment_name"]
             print(f"🤖 Using embedding provider: Azure OpenAI ({model_name})")
 
         print(f"📏 Embedding dimension: {self.config['qdrant']['vector_size']}")
 
         # Show branch info if specified
-        branch = self.config['github'].get('branch')
+        branch = self.config["github"].get("branch")
         if branch:
             print(f"🌿 Target branch: {branch}")
         else:
@@ -233,31 +240,35 @@ class GitHubToQdrantProcessor:
 
         # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.config['processing']['chunk_size'],
-            chunk_overlap=self.config['processing']['chunk_overlap'],
+            chunk_size=self.config["processing"]["chunk_size"],
+            chunk_overlap=self.config["processing"]["chunk_overlap"],
             # Markdown-aware separators
             separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
-            length_function=len
+            length_function=len,
         )
-        chunk_size = self.config['processing']['chunk_size']
-        chunk_overlap = self.config['processing']['chunk_overlap']
-        print(f"📝 Text splitter configured: {chunk_size} chars/chunk with {chunk_overlap} overlap")
+        chunk_size = self.config["processing"]["chunk_size"]
+        chunk_overlap = self.config["processing"]["chunk_overlap"]
+        print(
+            f"📝 Text splitter configured: {chunk_size} chars/chunk with {chunk_overlap} overlap"
+        )
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from JSON file."""
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
-            raise FileNotFoundError(f"Configuration file not found: {config_path}") from None
+            raise FileNotFoundError(
+                f"Configuration file not found: {config_path}"
+            ) from None
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in configuration file: {e}") from e
 
     def _setup_logging(self) -> None:
         """Setup logging configuration."""
         logging.basicConfig(
-            level=getattr(logging, self.config['logging']['level']),
-            format=self.config['logging']['format']
+            level=getattr(logging, self.config["logging"]["level"]),
+            format=self.config["logging"]["format"],
         )
         # Suppress verbose HTTP logs
         logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -274,28 +285,26 @@ class GitHubToQdrantProcessor:
         Returns:
             Embedding client instance with embed_documents() and embed_query() methods
         """
-        provider = self.config.get('embedding_provider', 'azure_openai')
+        provider = self.config.get("embedding_provider", "azure_openai")
 
-        if provider == 'mistral_ai':
-            mistral_config = self.config['mistral_ai']
+        if provider == "mistral_ai":
+            mistral_config = self.config["mistral_ai"]
             return MistralEmbeddingClient(
-                api_key=mistral_config['api_key'],
-                model=mistral_config['model'],
-                output_dimension=mistral_config.get('output_dimension', 1536)
+                api_key=mistral_config["api_key"],
+                model=mistral_config["model"],
+                output_dimension=mistral_config.get("output_dimension", 1536),
             )
-        elif provider == 'sentence_transformers':
-            st_config = self.config['sentence_transformers']
-            return SentenceTransformerClient(
-                model_name=st_config['model']
-            )
+        elif provider == "sentence_transformers":
+            st_config = self.config["sentence_transformers"]
+            return SentenceTransformerClient(model_name=st_config["model"])
         else:
             # Default to Azure OpenAI
-            azure_config = self.config['azure_openai']
+            azure_config = self.config["azure_openai"]
             return AzureOpenAIEmbeddings(
-                azure_endpoint=azure_config['endpoint'],
-                api_key=azure_config['api_key'],
-                azure_deployment=azure_config['deployment_name'],
-                api_version=azure_config['api_version']
+                azure_endpoint=azure_config["endpoint"],
+                api_key=azure_config["api_key"],
+                azure_deployment=azure_config["deployment_name"],
+                api_version=azure_config["api_version"],
             )
 
     def _initialize_qdrant(self) -> QdrantClient:
@@ -309,42 +318,42 @@ class GitHubToQdrantProcessor:
         Returns:
             Configured QdrantClient instance
         """
-        qdrant_config = self.config['qdrant']
+        qdrant_config = self.config["qdrant"]
 
         # Support both URL and host/port configurations
-        if 'url' in qdrant_config:
+        if "url" in qdrant_config:
             return QdrantClient(
-                url=qdrant_config['url'],
-                api_key=qdrant_config.get('api_key')
+                url=qdrant_config["url"], api_key=qdrant_config.get("api_key")
             )
         else:
             # Fallback to host/port configuration
-            if qdrant_config.get('api_key'):
+            if qdrant_config.get("api_key"):
                 return QdrantClient(
-                    host=qdrant_config['host'],
-                    port=qdrant_config['port'],
-                    api_key=qdrant_config['api_key']
+                    host=qdrant_config["host"],
+                    port=qdrant_config["port"],
+                    api_key=qdrant_config["api_key"],
                 )
             else:
                 return QdrantClient(
-                    host=qdrant_config['host'],
-                    port=qdrant_config['port']
+                    host=qdrant_config["host"], port=qdrant_config["port"]
                 )
 
     def _test_connections(self) -> None:
         """Test connections to embedding provider and Qdrant."""
         # Test embedding provider connection
-        provider = self.config.get('embedding_provider', 'azure_openai')
-        if provider == 'mistral_ai':
+        provider = self.config.get("embedding_provider", "azure_openai")
+        if provider == "mistral_ai":
             provider_name = "Mistral AI"
-        elif provider == 'sentence_transformers':
+        elif provider == "sentence_transformers":
             provider_name = "Sentence Transformers"
         else:
             provider_name = "Azure OpenAI"
 
         try:
             test_response = self.embeddings.embed_query("test connection")
-            print(f"✅ Connected to {provider_name}. Embedding dimension: {len(test_response)}")
+            print(
+                f"✅ Connected to {provider_name}. Embedding dimension: {len(test_response)}"
+            )
         except Exception as e:
             print(f"❌ Failed to connect to {provider_name}: {e}")
             raise
@@ -352,7 +361,9 @@ class GitHubToQdrantProcessor:
         # Test Qdrant connection
         try:
             collections = self.qdrant_client.get_collections()
-            print(f"✅ Connected to Qdrant. Found {len(collections.collections)} existing collections")
+            print(
+                f"✅ Connected to Qdrant. Found {len(collections.collections)} existing collections"
+            )
         except Exception as e:
             print(f"❌ Failed to connect to Qdrant: {e}")
             raise
@@ -360,10 +371,10 @@ class GitHubToQdrantProcessor:
     def _extract_repo_name(self, repo_url: str) -> str:
         """Extract repository name from URL."""
         parsed_url = urlparse(repo_url)
-        repo_path = parsed_url.path.strip('/')
-        if repo_path.endswith('.git'):
+        repo_path = parsed_url.path.strip("/")
+        if repo_path.endswith(".git"):
             repo_path = repo_path[:-4]
-        return repo_path.split('/')[-1]
+        return repo_path.split("/")[-1]
 
     def _clone_repository(self, repo_url: str, temp_dir: str) -> str:
         """
@@ -386,21 +397,26 @@ class GitHubToQdrantProcessor:
 
         # Handle authentication for private repositories
         auth_repo_url = repo_url
-        if self.config['github'].get('token'):
+        if self.config["github"].get("token"):
             # Insert token into URL for private repo access
             from urllib.parse import urlparse
+
             parsed = urlparse(repo_url)
-            if parsed.hostname == 'github.com':
-                auth_repo_url = f"https://{self.config['github']['token']}@github.com{parsed.path}"
+            if parsed.hostname == "github.com":
+                auth_repo_url = (
+                    f"https://{self.config['github']['token']}@github.com{parsed.path}"
+                )
             print("🔐 Using GitHub token for authentication")
 
         cmd = ["git", "clone"]
-        if self.config['github']['clone_depth']:
-            cmd.extend(["--depth", str(self.config['github']['clone_depth'])])
-            print(f"📈 Clone depth: {self.config['github']['clone_depth']} (shallow clone)")
+        if self.config["github"]["clone_depth"]:
+            cmd.extend(["--depth", str(self.config["github"]["clone_depth"])])
+            print(
+                f"📈 Clone depth: {self.config['github']['clone_depth']} (shallow clone)"
+            )
 
         # Add branch specification if provided
-        branch = self.config['github'].get('branch')
+        branch = self.config["github"].get("branch")
         if branch:
             cmd.extend(["--branch", branch])
             print(f"🌿 Target branch: {branch}")
@@ -433,15 +449,17 @@ class GitHubToQdrantProcessor:
         print("\n🔍 Searching for markdown files...")
 
         markdown_files = []
-        extensions = self.config['processing']['markdown_extensions']
-        exclude_patterns = self.config['processing']['exclude_patterns']
+        extensions = self.config["processing"]["markdown_extensions"]
+        exclude_patterns = self.config["processing"]["exclude_patterns"]
 
         print(f"📝 Looking for extensions: {', '.join(extensions)}")
         print(f"🚫 Excluding patterns: {', '.join(exclude_patterns)}")
 
         for root, dirs, files in os.walk(directory):
             # Remove excluded directories from search
-            dirs[:] = [d for d in dirs if not any(pattern in d for pattern in exclude_patterns)]
+            dirs[:] = [
+                d for d in dirs if not any(pattern in d for pattern in exclude_patterns)
+            ]
 
             for file in files:
                 if any(file.lower().endswith(ext) for ext in extensions):
@@ -497,7 +515,7 @@ class GitHubToQdrantProcessor:
         print(f"\n📄 Combining {len(markdown_files)} markdown files by folder...")
 
         # Create output directory
-        output_dir = os.path.join(self.config['output']['base_directory'], repo_name)
+        output_dir = os.path.join(self.config["output"]["base_directory"], repo_name)
         os.makedirs(output_dir, exist_ok=True)
         print(f"📁 Output directory: {output_dir}")
 
@@ -506,7 +524,10 @@ class GitHubToQdrantProcessor:
         # Find the actual repository root by going up until we find .git or reach reasonable depth
         temp_root = repo_root
         for _ in range(10):  # Max 10 levels up
-            if os.path.exists(os.path.join(temp_root, '.git')) or os.path.basename(temp_root) == 'repo':
+            if (
+                os.path.exists(os.path.join(temp_root, ".git"))
+                or os.path.basename(temp_root) == "repo"
+            ):
                 repo_root = temp_root
                 break
             temp_root = os.path.dirname(temp_root)
@@ -537,10 +558,18 @@ class GitHubToQdrantProcessor:
 
         # Create combined files for each folder
         all_combined_content = []
-        all_combined_content.append(f"# Combined Markdown Documentation for {repo_name}\n\n")
-        all_combined_content.append(f"This document contains all markdown files from the repository, organized by folder.\n\n")
-        all_combined_content.append(f"📊 **Statistics**: {len(markdown_files)} files from {len(folder_groups)} folders\n")
-        all_combined_content.append(f"🕒 **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        all_combined_content.append(
+            f"# Combined Markdown Documentation for {repo_name}\n\n"
+        )
+        all_combined_content.append(
+            "This document contains all markdown files from the repository, organized by folder.\n\n"
+        )
+        all_combined_content.append(
+            f"📊 **Statistics**: {len(markdown_files)} files from {len(folder_groups)} folders\n"
+        )
+        all_combined_content.append(
+            f"🕒 **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
         all_combined_content.append("---\n\n")
 
         successful_reads = 0
@@ -551,7 +580,7 @@ class GitHubToQdrantProcessor:
             print(f"\n📝 Processing {len(root_files)} root-level files...")
             root_content = self._combine_files_in_group(root_files, "root", repo_root)
             root_file_path = os.path.join(output_dir, f"{repo_name}_root.md")
-            with open(root_file_path, 'w', encoding='utf-8') as f:
+            with open(root_file_path, "w", encoding="utf-8") as f:
                 f.write(root_content)
 
             all_combined_content.append("# Root Level Files\n\n")
@@ -568,7 +597,7 @@ class GitHubToQdrantProcessor:
 
             # Save folder-specific combined file
             folder_file_path = os.path.join(output_dir, f"{folder_name}.md")
-            with open(folder_file_path, 'w', encoding='utf-8') as f:
+            with open(folder_file_path, "w", encoding="utf-8") as f:
                 f.write(folder_content)
 
             # Add to overall combined content
@@ -581,30 +610,38 @@ class GitHubToQdrantProcessor:
             print(f"   ✅ Created: {os.path.basename(folder_file_path)}")
 
         # Write overall combined markdown file
-        combined_file_path = os.path.join(output_dir, self.config['output']['combined_filename'])
-        with open(combined_file_path, 'w', encoding='utf-8') as f:
-            f.write(''.join(all_combined_content))
+        combined_file_path = os.path.join(
+            output_dir, self.config["output"]["combined_filename"]
+        )
+        with open(combined_file_path, "w", encoding="utf-8") as f:
+            f.write("".join(all_combined_content))
 
         file_size_mb = os.path.getsize(combined_file_path) / (1024 * 1024)
-        created_files = len(folder_groups) + (1 if root_files else 0) + 1  # +1 for combined file
+        created_files = (
+            len(folder_groups) + (1 if root_files else 0) + 1
+        )  # +1 for combined file
 
-        print(f"\n✅ Markdown combination completed!")
-        print(f"📊 Summary:")
+        print("\n✅ Markdown combination completed!")
+        print("📊 Summary:")
         print(f"   Files processed: {successful_reads}/{len(markdown_files)}")
         print(f"   Created files: {created_files} (folder files + combined)")
-        print(f"   Combined file: {os.path.basename(combined_file_path)} ({file_size_mb:.2f}MB)")
+        print(
+            f"   Combined file: {os.path.basename(combined_file_path)} ({file_size_mb:.2f}MB)"
+        )
         print(f"   Total characters: {total_chars:,}")
 
-        return ''.join(all_combined_content)
+        return "".join(all_combined_content)
 
-    def _combine_files_in_group(self, files: List[str], group_name: str, repo_root: str) -> str:
+    def _combine_files_in_group(
+        self, files: List[str], group_name: str, repo_root: str
+    ) -> str:
         """Combine files within a specific group/folder."""
         content_parts = []
         content_parts.append(f"## Files in {group_name}\n\n")
 
         for md_file in sorted(files):
             try:
-                with open(md_file, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(md_file, "r", encoding="utf-8", errors="ignore") as f:
                     file_content = f.read()
 
                 relative_path = os.path.relpath(md_file, repo_root)
@@ -616,7 +653,7 @@ class GitHubToQdrantProcessor:
                 print(f"⚠️  Warning: Could not read {md_file}: {e}")
                 continue
 
-        return ''.join(content_parts)
+        return "".join(content_parts)
 
     def _generate_chunk_id(self, content: str, chunk_index: int, repo_name: str) -> str:
         """
@@ -639,7 +676,7 @@ class GitHubToQdrantProcessor:
         content_hash = hashlib.md5(content.encode()).hexdigest()
 
         # Create a deterministic UUID from the hash
-        namespace = uuid.UUID('12345678-1234-5678-1234-123456789abc')
+        namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
         unique_string = f"{repo_name}_{chunk_index}_{content_hash}"
         return str(uuid.uuid5(namespace, unique_string))
 
@@ -653,7 +690,9 @@ class GitHubToQdrantProcessor:
         norms = np.linalg.norm(vec1_np) * np.linalg.norm(vec2_np)
         return dot_product / norms if norms != 0 else 0
 
-    def _calculate_batch_similarities(self, query_embedding: np.ndarray, target_embeddings: np.ndarray) -> np.ndarray:
+    def _calculate_batch_similarities(
+        self, query_embedding: np.ndarray, target_embeddings: np.ndarray
+    ) -> np.ndarray:
         """
         Calculate cosine similarities using optimized vectorized operations.
 
@@ -671,7 +710,9 @@ class GitHubToQdrantProcessor:
         """
         # Normalize embeddings for cosine similarity
         query_norm = query_embedding / np.linalg.norm(query_embedding)
-        target_norms = target_embeddings / np.linalg.norm(target_embeddings, axis=1, keepdims=True)
+        target_norms = target_embeddings / np.linalg.norm(
+            target_embeddings, axis=1, keepdims=True
+        )
 
         # Compute similarities using matrix multiplication
         similarities = np.dot(target_norms, query_norm)
@@ -679,10 +720,14 @@ class GitHubToQdrantProcessor:
 
     def _calculate_content_hash(self, content: str) -> str:
         """Calculate MD5 hash of content for fast duplicate pre-filtering."""
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
+        return hashlib.md5(content.encode("utf-8")).hexdigest()
 
-    def _remove_duplicates(self, chunks: List[Document], embeddings: List[List[float]],
-                          similarity_threshold: float = 0.95) -> tuple[List[Document], List[List[float]]]:
+    def _remove_duplicates(
+        self,
+        chunks: List[Document],
+        embeddings: List[List[float]],
+        similarity_threshold: float = 0.95,
+    ) -> tuple[List[Document], List[List[float]]]:
         """
         High-performance deduplication using two-stage filtering approach.
 
@@ -711,14 +756,18 @@ class GitHubToQdrantProcessor:
         if not chunks or not embeddings:
             return chunks, embeddings
 
-        print(f"🔍 Checking for duplicates with similarity threshold: {similarity_threshold}")
+        print(
+            f"🔍 Checking for duplicates with similarity threshold: {similarity_threshold}"
+        )
         print(f"📊 Processing {len(chunks)} chunks for deduplication...")
 
         # Convert to numpy array for faster operations
         embeddings_np = np.array(embeddings)
 
         # Pre-compute content hashes for fast duplicate detection
-        content_hashes = [self._calculate_content_hash(chunk.page_content) for chunk in chunks]
+        content_hashes = [
+            self._calculate_content_hash(chunk.page_content) for chunk in chunks
+        ]
         hash_to_indices = {}
 
         # Group chunks by content hash for exact duplicates
@@ -749,9 +798,15 @@ class GitHubToQdrantProcessor:
                 continue
 
             processed_count += 1
-            if processed_count % 100 == 0 or processed_count == len(chunks) - len(exact_duplicates):
-                progress = (processed_count / (len(chunks) - len(exact_duplicates))) * 100
-                print(f"  📈 Similarity check progress: {progress:.1f}% ({processed_count}/{len(chunks) - len(exact_duplicates)})")
+            if processed_count % 100 == 0 or processed_count == len(chunks) - len(
+                exact_duplicates
+            ):
+                progress = (
+                    processed_count / (len(chunks) - len(exact_duplicates))
+                ) * 100
+                print(
+                    f"  📈 Similarity check progress: {progress:.1f}% ({processed_count}/{len(chunks) - len(exact_duplicates)})"
+                )
 
             is_duplicate = False
 
@@ -766,7 +821,9 @@ class GitHubToQdrantProcessor:
                     batch_embeddings = embeddings_np[batch_indices]
 
                     # Calculate similarities for entire batch at once
-                    similarities = self._calculate_batch_similarities(embeddings_np[i], batch_embeddings)
+                    similarities = self._calculate_batch_similarities(
+                        embeddings_np[i], batch_embeddings
+                    )
 
                     # Check if any similarity exceeds threshold
                     max_similarity_idx = np.argmax(similarities)
@@ -774,8 +831,12 @@ class GitHubToQdrantProcessor:
 
                     if max_similarity >= similarity_threshold:
                         duplicate_idx = batch_indices[max_similarity_idx]
-                        print(f"  🚫 Removing duplicate chunk (similarity: {max_similarity:.3f})")
-                        print(f"      Chunk {duplicate_idx+1} vs {i+1}: {len(chunks[duplicate_idx].page_content)} vs {len(chunks[i].page_content)} chars")
+                        print(
+                            f"  🚫 Removing duplicate chunk (similarity: {max_similarity:.3f})"
+                        )
+                        print(
+                            f"      Chunk {duplicate_idx + 1} vs {i + 1}: {len(chunks[duplicate_idx].page_content)} vs {len(chunks[i].page_content)} chars"
+                        )
                         is_duplicate = True
                         removed_count += 1
                         break
@@ -789,11 +850,15 @@ class GitHubToQdrantProcessor:
 
         similarity_removed = removed_count - len(exact_duplicates)
         print(f"✅ Deduplication complete: {len(chunks)} → {len(unique_chunks)} chunks")
-        print(f"   📊 Removed {len(exact_duplicates)} exact duplicates + {similarity_removed} similarity duplicates")
+        print(
+            f"   📊 Removed {len(exact_duplicates)} exact duplicates + {similarity_removed} similarity duplicates"
+        )
 
         return unique_chunks, unique_embeddings
 
-    def _generate_embeddings_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
+    def _generate_embeddings_with_retry(
+        self, texts: List[str], max_retries: int = 3
+    ) -> List[List[float]]:
         """
         Generate embeddings with intelligent retry logic for API rate limiting.
 
@@ -813,7 +878,7 @@ class GitHubToQdrantProcessor:
         Returns:
             List of embedding vectors
         """
-        provider = self.config.get('embedding_provider', 'azure_openai')
+        provider = self.config.get("embedding_provider", "azure_openai")
 
         for attempt in range(max_retries):
             try:
@@ -823,16 +888,20 @@ class GitHubToQdrantProcessor:
                 error_str = str(e)
 
                 # Check if it's a rate limit error (429) or similar
-                is_rate_limit = ("429" in error_str or
-                               "rate limit" in error_str.lower() or
-                               "quota" in error_str.lower() or
-                               "too many requests" in error_str.lower())
+                is_rate_limit = (
+                    "429" in error_str
+                    or "rate limit" in error_str.lower()
+                    or "quota" in error_str.lower()
+                    or "too many requests" in error_str.lower()
+                )
 
                 if is_rate_limit:
                     if attempt < max_retries - 1:
                         # Different wait strategies for different providers
-                        if provider == 'mistral_ai':
-                            wait_time = 30  # Mistral AI typically has shorter wait times
+                        if provider == "mistral_ai":
+                            wait_time = (
+                                30  # Mistral AI typically has shorter wait times
+                            )
                         else:
                             wait_time = 60  # Azure OpenAI default
 
@@ -840,17 +909,24 @@ class GitHubToQdrantProcessor:
                         if "retry after" in error_str.lower():
                             try:
                                 import re
-                                match = re.search(r'retry after (\d+)', error_str.lower())
+
+                                match = re.search(
+                                    r"retry after (\d+)", error_str.lower()
+                                )
                                 if match:
                                     wait_time = int(match.group(1))
-                            except:
+                            except (ValueError, AttributeError):
                                 pass
 
                         # Add exponential backoff
-                        backoff_time = wait_time + (2 ** attempt * 5)
+                        backoff_time = wait_time + (2**attempt * 5)
 
-                        provider_name = "Mistral AI" if provider == 'mistral_ai' else "Azure OpenAI"
-                        print(f"⏳ {provider_name} rate limit hit. Waiting {backoff_time} seconds before retry (attempt {attempt + 1}/{max_retries})...")
+                        provider_name = (
+                            "Mistral AI" if provider == "mistral_ai" else "Azure OpenAI"
+                        )
+                        print(
+                            f"⏳ {provider_name} rate limit hit. Waiting {backoff_time} seconds before retry (attempt {attempt + 1}/{max_retries})..."
+                        )
                         time.sleep(backoff_time)
                         continue
                     else:
@@ -876,16 +952,18 @@ class GitHubToQdrantProcessor:
         The vector size must match the embedding model's output dimension
         (e.g., 3072 for text-embedding-3-large, 1536 for text-embedding-3-small).
         """
-        print(f"\n🏗️  Setting up Qdrant collection...")
+        print("\n🏗️  Setting up Qdrant collection...")
 
-        qdrant_config = self.config['qdrant']
-        collection_name = qdrant_config['collection_name']
+        qdrant_config = self.config["qdrant"]
+        collection_name = qdrant_config["collection_name"]
 
         # Check if collection exists
         collections = self.qdrant_client.get_collections()
-        collection_exists = any(col.name == collection_name for col in collections.collections)
+        collection_exists = any(
+            col.name == collection_name for col in collections.collections
+        )
 
-        if collection_exists and qdrant_config['recreate_collection']:
+        if collection_exists and qdrant_config["recreate_collection"]:
             print(f"🔄 Recreating existing collection: {collection_name}")
             self.qdrant_client.delete_collection(collection_name)
             collection_exists = False
@@ -898,39 +976,44 @@ class GitHubToQdrantProcessor:
             distance_map = {
                 "Cosine": Distance.COSINE,
                 "Euclidean": Distance.EUCLID,
-                "Dot": Distance.DOT
+                "Dot": Distance.DOT,
             }
 
             # Check if we should create named vectors for MCP compatibility
-            vector_name = qdrant_config.get('vector_name')
+            vector_name = qdrant_config.get("vector_name")
             if vector_name:
                 print(f"   Creating named vector: {vector_name}")
                 # Create collection with named vectors
                 vectors_config = {
                     vector_name: VectorParams(
-                        size=qdrant_config['vector_size'],
-                        distance=distance_map.get(qdrant_config['distance'], Distance.COSINE)
+                        size=qdrant_config["vector_size"],
+                        distance=distance_map.get(
+                            qdrant_config["distance"], Distance.COSINE
+                        ),
                     )
                 }
                 self.qdrant_client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=vectors_config
+                    collection_name=collection_name, vectors_config=vectors_config
                 )
             else:
-                print(f"   Creating default (unnamed) vectors")
+                print("   Creating default (unnamed) vectors")
                 # Create collection with default vectors
                 self.qdrant_client.create_collection(
                     collection_name=collection_name,
                     vectors_config=VectorParams(
-                        size=qdrant_config['vector_size'],
-                        distance=distance_map.get(qdrant_config['distance'], Distance.COSINE)
-                    )
+                        size=qdrant_config["vector_size"],
+                        distance=distance_map.get(
+                            qdrant_config["distance"], Distance.COSINE
+                        ),
+                    ),
                 )
             print(f"✅ Collection '{collection_name}' created successfully")
         else:
             print(f"📚 Using existing collection: {collection_name}")
 
-    def _process_and_upload_documents(self, combined_content: str, repo_name: str) -> None:
+    def _process_and_upload_documents(
+        self, combined_content: str, repo_name: str
+    ) -> None:
         """
         Process combined content into chunks and upload to Qdrant with comprehensive pipeline.
 
@@ -952,10 +1035,10 @@ class GitHubToQdrantProcessor:
             combined_content: Complete markdown content to process
             repo_name: Repository name for metadata and tracking
         """
-        print(f"\n🧠 Processing and uploading documents to Qdrant...")
+        print("\n🧠 Processing and uploading documents to Qdrant...")
 
         # Create document
-        branch = self.config['github'].get('branch', 'default')
+        branch = self.config["github"].get("branch", "default")
         document = Document(
             page_content=combined_content,
             metadata={
@@ -963,8 +1046,8 @@ class GitHubToQdrantProcessor:
                 "repository": repo_name,
                 "branch": branch,
                 "document_type": "combined_markdown",
-                "processed_at": datetime.now().isoformat()
-            }
+                "processed_at": datetime.now().isoformat(),
+            },
         )
 
         # Split document into chunks
@@ -982,20 +1065,26 @@ class GitHubToQdrantProcessor:
         print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
         all_texts = [chunk.page_content for chunk in chunks]
 
-        embedding_batch_size = self.config['processing'].get('embedding_batch_size', 20)
-        max_retries = self.config['processing'].get('max_retries', 3)
-        batch_delay = self.config['processing'].get('batch_delay_seconds', 1)
+        embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
+        max_retries = self.config["processing"].get("max_retries", 3)
+        batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
 
         all_embeddings = []
 
         for i in range(0, len(all_texts), embedding_batch_size):
-            batch_texts = all_texts[i:i + embedding_batch_size]
+            batch_texts = all_texts[i : i + embedding_batch_size]
             batch_num = (i // embedding_batch_size) + 1
-            total_embedding_batches = (len(all_texts) + embedding_batch_size - 1) // embedding_batch_size
+            total_embedding_batches = (
+                len(all_texts) + embedding_batch_size - 1
+            ) // embedding_batch_size
 
-            print(f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)")
+            print(
+                f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)"
+            )
 
-            batch_embeddings = self._generate_embeddings_with_retry(batch_texts, max_retries)
+            batch_embeddings = self._generate_embeddings_with_retry(
+                batch_texts, max_retries
+            )
             all_embeddings.extend(batch_embeddings)
 
             # Delay between batches to be gentle on the API
@@ -1003,10 +1092,14 @@ class GitHubToQdrantProcessor:
                 time.sleep(batch_delay)
 
         # Remove duplicates based on embedding similarity (if enabled)
-        if self.config['processing'].get('deduplication_enabled', True):
+        if self.config["processing"].get("deduplication_enabled", True):
             print("🔍 Running deduplication analysis...")
-            similarity_threshold = self.config['processing'].get('similarity_threshold', 0.95)
-            unique_chunks, unique_embeddings = self._remove_duplicates(chunks, all_embeddings, similarity_threshold=similarity_threshold)
+            similarity_threshold = self.config["processing"].get(
+                "similarity_threshold", 0.95
+            )
+            unique_chunks, unique_embeddings = self._remove_duplicates(
+                chunks, all_embeddings, similarity_threshold=similarity_threshold
+            )
         else:
             print("ℹ️  Deduplication disabled - using all chunks")
             unique_chunks, unique_embeddings = chunks, all_embeddings
@@ -1017,68 +1110,83 @@ class GitHubToQdrantProcessor:
 
         # Process unique chunks in batches for upload
         batch_size = 10
-        collection_name = self.config['qdrant']['collection_name']
+        collection_name = self.config["qdrant"]["collection_name"]
         total_batches = (len(unique_chunks) + batch_size - 1) // batch_size
 
-        print(f"🚀 Starting batch upload: {total_batches} batches of {batch_size} chunks each")
+        print(
+            f"🚀 Starting batch upload: {total_batches} batches of {batch_size} chunks each"
+        )
 
         successful_uploads = 0
 
         for i in range(0, len(unique_chunks), batch_size):
             batch_num = i // batch_size + 1
-            batch_chunks = unique_chunks[i:i + batch_size]
-            batch_embeddings = unique_embeddings[i:i + batch_size]
+            batch_chunks = unique_chunks[i : i + batch_size]
+            batch_embeddings = unique_embeddings[i : i + batch_size]
 
             try:
-
                 # Create points for Qdrant
                 points = []
-                for j, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                for j, (chunk, embedding) in enumerate(
+                    zip(batch_chunks, batch_embeddings)
+                ):
                     # Generate deterministic ID for chunk
                     chunk_index = i + j
-                    point_id = self._generate_chunk_id(chunk.page_content, chunk_index, repo_name)
+                    point_id = self._generate_chunk_id(
+                        chunk.page_content, chunk_index, repo_name
+                    )
 
-                    metadata = chunk.metadata.copy()
-                    metadata.update({
-                        "chunk_id": chunk_index,
-                        "chunk_size": len(chunk.page_content),
-                        "text_preview": chunk.page_content[:200] + "..." if len(chunk.page_content) > 200 else chunk.page_content,
-                        "batch_number": batch_num,
-                        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],  # Short hash for reference
-                        "document": chunk.page_content,  # Full document content for MCP server compatibility
-                        "information": chunk.page_content  # Alternative field name that MCP server might expect
-                    })
+                    # Standard LangChain/Qdrant payload structure with MCP compatibility
+                    payload = {
+                        "page_content": chunk.page_content,  # Standard field name for full text content
+                        "document": chunk.page_content,  # MCP server compatibility field (root level)
+                        "metadata": {
+                            **chunk.metadata,  # Original metadata (source, repository, branch, etc.)
+                            "chunk_id": chunk_index,
+                            "chunk_size": len(chunk.page_content),
+                            "preview": chunk.page_content[:200] + "..."
+                            if len(chunk.page_content) > 200
+                            else chunk.page_content,
+                            "batch_number": batch_num,
+                            "content_hash": hashlib.md5(
+                                chunk.page_content.encode()
+                            ).hexdigest()[:8],  # Short hash for reference
+                        }
+                    }
 
                     # Handle named vectors vs default vectors
-                    vector_name = self.config['qdrant'].get('vector_name')
+                    vector_name = self.config["qdrant"].get("vector_name")
                     if vector_name:
                         # Use named vectors - create dict for named vectors
-                        points.append(PointStruct(
-                            id=point_id,
-                            vector={vector_name: embedding},
-                            payload=metadata
-                        ))
+                        points.append(
+                            PointStruct(
+                                id=point_id,
+                                vector={vector_name: embedding},
+                                payload=payload,
+                            )
+                        )
                     else:
                         # Use default vectors - pass embedding directly
-                        points.append(PointStruct(
-                            id=point_id,
-                            vector=embedding,
-                            payload=metadata
-                        ))
+                        points.append(
+                            PointStruct(id=point_id, vector=embedding, payload=payload)
+                        )
 
                 # Upload batch to Qdrant
                 self.qdrant_client.upsert(
-                    collection_name=collection_name,
-                    points=points
+                    collection_name=collection_name, points=points
                 )
 
                 successful_uploads += len(batch_chunks)
-                print(f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)")
+                print(
+                    f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)"
+                )
 
                 # Show progress every 20 batches or at the end (less verbose)
                 if batch_num % 20 == 0 or batch_num == total_batches:
                     progress = (successful_uploads / len(unique_chunks)) * 100
-                    print(f"  📊 Progress: {progress:.0f}% ({successful_uploads}/{len(unique_chunks)} unique chunks)")
+                    print(
+                        f"  📊 Progress: {progress:.0f}% ({successful_uploads}/{len(unique_chunks)} unique chunks)"
+                    )
 
             except Exception as e:
                 print(f"  ❌ Failed to upload batch {batch_num}: {e}")
@@ -1086,9 +1194,13 @@ class GitHubToQdrantProcessor:
 
         original_count = len(chunks)
         duplicate_count = original_count - len(unique_chunks)
-        print(f"🎉 Successfully uploaded {successful_uploads}/{len(unique_chunks)} unique chunks to Qdrant collection '{collection_name}'")
+        print(
+            f"🎉 Successfully uploaded {successful_uploads}/{len(unique_chunks)} unique chunks to Qdrant collection '{collection_name}'"
+        )
         if duplicate_count > 0:
-            print(f"   📊 Deduplication stats: {duplicate_count} duplicates removed from {original_count} original chunks")
+            print(
+                f"   📊 Deduplication stats: {duplicate_count} duplicates removed from {original_count} original chunks"
+            )
 
     def process_repository(self, repo_url: Optional[str] = None) -> None:
         """
@@ -1112,11 +1224,13 @@ class GitHubToQdrantProcessor:
         start_time = datetime.now()
 
         if not repo_url:
-            repo_url = self.config['github']['repository_url']
+            repo_url = self.config["github"]["repository_url"]
 
         # Type guard to ensure repo_url is not None
         if repo_url is None:
-            raise ValueError("Repository URL is required either as parameter or in config")
+            raise ValueError(
+                "Repository URL is required either as parameter or in config"
+            )
 
         repo_name = self._extract_repo_name(repo_url)
         print(f"\n🎯 Processing repository: {repo_name}")
@@ -1135,28 +1249,34 @@ class GitHubToQdrantProcessor:
                     return
 
                 # Combine markdown files into folder-based files + overall combined file
-                combined_content = self._combine_markdown_files(markdown_files, repo_name)
+                combined_content = self._combine_markdown_files(
+                    markdown_files, repo_name
+                )
 
                 # Setup Qdrant collection
                 self._setup_qdrant_collection()
 
                 # Process and upload ONLY the final combined document (not individual folder files)
-                print(f"\n🎯 Creating vector embeddings for the combined document only...")
+                print(
+                    "\n🎯 Creating vector embeddings for the combined document only..."
+                )
                 self._process_and_upload_documents(combined_content, repo_name)
 
                 # Calculate and display final statistics
                 end_time = datetime.now()
                 duration = end_time - start_time
 
-                print(f"\n🎉 Repository processing completed successfully!")
+                print("\n🎉 Repository processing completed successfully!")
                 print("=" * 60)
-                print(f"📊 **Final Summary**")
+                print("📊 **Final Summary**")
                 print(f"   Repository: {repo_name}")
-                branch = self.config['github'].get('branch')
+                branch = self.config["github"].get("branch")
                 if branch:
                     print(f"   Branch: {branch}")
                 print(f"   Markdown files: {len(markdown_files)}")
-                print(f"   Total processing time: {duration.total_seconds():.1f} seconds")
+                print(
+                    f"   Total processing time: {duration.total_seconds():.1f} seconds"
+                )
                 print(f"   Collection: {self.config['qdrant']['collection_name']}")
                 print(f"   Output directory: markdown/{repo_name}/")
                 print(f"   Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1165,7 +1285,7 @@ class GitHubToQdrantProcessor:
                 print(f"❌ Error processing repository: {e}")
                 raise
             finally:
-                if self.config['github']['cleanup_after_processing']:
+                if self.config["github"]["cleanup_after_processing"]:
                     print("🧹 Cleaning up temporary files")
 
 
@@ -1174,14 +1294,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Process GitHub repository markdown files into Qdrant vector database"
     )
+    parser.add_argument("config", help="Path to JSON configuration file")
     parser.add_argument(
-        "config",
-        help="Path to JSON configuration file"
-    )
-    parser.add_argument(
-        "--repo-url",
-        help="GitHub repository URL (overrides config file)",
-        default=None
+        "--repo-url", help="GitHub repository URL (overrides config file)", default=None
     )
 
     args = parser.parse_args()
