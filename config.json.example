@@ -9,7 +9,7 @@
   },
   
   // EMBEDDING PROVIDER SELECTION
-  "embedding_provider": "azure_openai",     // Options: "azure_openai", "mistral_ai"
+  "embedding_provider": "azure_openai",     // Options: "azure_openai", "mistral_ai", "sentence_transformers"
   
   "azure_openai": {
     // Azure OpenAI embedding service configuration
@@ -27,13 +27,20 @@
     "api_base": "https://api.mistral.ai/v1"
   },
   
+  "sentence_transformers": {
+    // Sentence Transformers (Local) embedding configuration
+    "model": "intfloat/multilingual-e5-large",  // Options: "sentence-transformers/all-MiniLM-L6-v2" (384 dim), "intfloat/multilingual-e5-large" (1024 dim)
+    "vector_size": 1024                    // Must match model: all-MiniLM-L6-v2=384, multilingual-e5-large=1024
+  },
+  
   "qdrant": {
     // Qdrant vector database configuration
     "url": "https://your-cluster-id.region.cloud.qdrant.io:6333",
     "api_key": "your-qdrant-api-key-here",
     "collection_name": "your-collection-name",
-    "vector_size": 3072,                 // Must match embedding model: ada-002=1536, 3-small=1536, 3-large=3072, mistral-embed=1024, codestral-embed=1536/3072
+    "vector_size": 3072,                 // Must match embedding model dimensions (see table below)
     "distance": "Cosine",                // Available: Cosine, Euclidean, Dot
+    "vector_name": null,                 // VECTOR NAMING: null/empty = unnamed vectors (default), "model-name" = named vectors (for MCP compatibility)
     "recreate_collection": false         // WARNING: true will delete existing collection!
   },
   
@@ -77,6 +84,27 @@ USAGE EXAMPLES:
 2. Override repository URL:
    python3 github_to_qdrant.py config.json.example --repo-url https://github.com/different/repo.git
 
+PROVIDER-SPECIFIC SETUP:
+
+For Azure OpenAI:
+1. Set embedding_provider to "azure_openai"
+2. Configure azure_openai section with your API key and endpoint
+3. Set vector_size to match your model (1536 or 3072)
+
+For Mistral AI:
+1. Set embedding_provider to "mistral_ai" 
+2. Configure mistral_ai section with your API key
+3. Set vector_size to match output_dimension (1536 or 3072)
+
+For Sentence Transformers (Local):
+1. Set embedding_provider to "sentence_transformers"
+2. Choose model: "sentence-transformers/all-MiniLM-L6-v2" or "intfloat/multilingual-e5-large"
+3. Set vector_size to match model dimensions (384 or 1024)
+4. Install: pip install sentence-transformers
+5. Vector naming options:
+   - vector_name: null or omit entirely → Creates unnamed/default vectors (standard)
+   - vector_name: "model-name" → Creates named vectors (for MCP servers)
+
 PERFORMANCE NOTES:
 - embedding_batch_size=50: Optimized for Azure OpenAI (2.5x faster than default 20)
 - batch_delay_seconds=1: REQUIRED to prevent Azure OpenAI rate limit errors
@@ -92,6 +120,26 @@ Azure OpenAI:
 Mistral AI:
 - mistral-embed: 1024 dimensions (general text)
 - codestral-embed: 1536 dimensions (default) up to 3072 (code-specialized, recommended for technical docs)
+
+Sentence Transformers (Local):
+- sentence-transformers/all-MiniLM-L6-v2: 384 dimensions (lightweight, fast)
+- intfloat/multilingual-e5-large: 1024 dimensions (multilingual, high quality)
+
+BENEFITS BY PROVIDER:
+Azure OpenAI: Best quality, latest models, enterprise support
+Mistral AI: Code-specialized models, competitive pricing, European provider
+Sentence Transformers: No API costs, privacy (local processing), no rate limits, offline capable
+
+VECTOR NAMING EXPLAINED:
+Default/Unnamed Vectors (vector_name: null):
+- Standard Qdrant behavior - vectors stored without specific names
+- Compatible with most Qdrant clients and applications
+- Simpler configuration and usage
+
+Named Vectors (vector_name: "model-name"):
+- Required for MCP (Model Context Protocol) servers
+- Allows multiple embedding models in same collection
+- Vector name should match the embedding model identifier
 
 SECURITY:
 - Never commit API keys to version control

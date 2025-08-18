@@ -1,6 +1,6 @@
 # 🚀 GitHub to Qdrant Vector Processing Pipeline
 
-**High-performance document processing pipeline that transforms GitHub repositories containing markdown files into searchable vector databases for AI applications. Can be extended to process other text-based files like HTML, TXT, and more.**
+**High-performance document processing pipeline that transforms GitHub repositories containing markdown files into searchable vector databases for AI applications. Features multiple embedding providers including cloud-based and local models. Can be extended to process other text-based files like HTML, TXT, and more.**
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
@@ -8,11 +8,11 @@
 
 ## 🌟 Overview
 
-This project automatically processes GitHub repositories containing markdown documentation and creates optimized vector embeddings for **Retrieval-Augmented Generation (RAG)**, semantic search, and AI chat applications. While primarily designed for markdown files, it can be adapted to process other text-based formats like HTML, TXT, and similar files. It supports multiple embedding providers and features cutting-edge deduplication algorithms.
+This project automatically processes GitHub repositories containing markdown documentation and creates optimized vector embeddings for **Retrieval-Augmented Generation (RAG)**, semantic search, and AI chat applications. While primarily designed for markdown files, it can be adapted to process other text-based formats like HTML, TXT, and similar files. It supports multiple embedding providers including cloud-based APIs and local models, featuring cutting-edge deduplication algorithms.
 
 ### ✨ Key Features
 
-- 🔄 **Dual Embedding Support**: Azure OpenAI & Mistral AI
+- 🔄 **Multi-Provider Support**: Azure OpenAI, Mistral AI & Sentence Transformers
 - ⚡ **5-15x Faster Processing**: Vectorized duplicate detection
 - 🎯 **Smart Deduplication**: Content hash + semantic similarity
 - 📊 **Real-time Progress**: Detailed processing reports
@@ -78,6 +78,7 @@ pip install -r requirements.txt
 - `openai>=1.0.0` - Azure OpenAI embeddings
 - `numpy>=1.24.0` - Vectorized operations
 - `mistralai>=0.4.0` - Mistral AI embeddings
+- `sentence-transformers>=2.0.0` - Local embedding models (optional)
 
 ### Virtual Environment (Recommended)
 
@@ -146,6 +147,28 @@ The project uses JSON configuration files. Start with `config.json.example`:
 }
 ```
 
+#### Sentence Transformers (Local)
+```json
+{
+  "embedding_provider": "sentence_transformers",
+  "sentence_transformers": {
+    "model": "intfloat/multilingual-e5-large",
+    "vector_size": 1024
+  },
+  "qdrant": {
+    "vector_size": 1024,
+    "vector_name": "intfloat/multilingual-e5-large"  // Optional: for MCP compatibility
+  }
+}
+```
+
+**Sentence Transformers Benefits:**
+- ✅ **No API Keys Required** - Runs locally
+- ✅ **No Rate Limits** - Process any amount of data  
+- ✅ **Privacy** - Data never leaves your machine
+- ✅ **Cost Effective** - No per-token charges
+- ✅ **Offline Capable** - Works without internet
+
 ### 🎛️ Performance Tuning
 
 ```json
@@ -208,6 +231,17 @@ python github_to_qdrant.py config_enterprise.json
 }
 ```
 
+**Use Local Models:**
+```json
+{
+  "embedding_provider": "sentence_transformers",
+  "sentence_transformers": {
+    "model": "intfloat/multilingual-e5-large",
+    "vector_size": 1024
+  }
+}
+```
+
 ## 📊 Embedding Models Comparison
 
 | Provider | Model | Dimensions | Best For | Context |
@@ -217,6 +251,8 @@ python github_to_qdrant.py config_enterprise.json
 | **Azure OpenAI** | text-embedding-3-large | 3072 | **Best quality** | 8,191 tokens |
 | **Mistral AI** | mistral-embed | 1024 | General text | 8,000 tokens |
 | **Mistral AI** | codestral-embed | 3072 | **Technical docs** | 8,000 tokens |
+| **Sentence Transformers** | all-MiniLM-L6-v2 | 384 | **Lightweight/Fast** | 256 tokens |
+| **Sentence Transformers** | multilingual-e5-large | 1024 | **Multilingual** | 512 tokens |
 
 ### 💡 Recommendations
 
@@ -224,6 +260,10 @@ python github_to_qdrant.py config_enterprise.json
 - **General Documentation**: Use `text-embedding-3-large` (Azure OpenAI) 
 - **Cost-Effective**: Use `text-embedding-3-small` (Azure OpenAI)
 - **Code Repositories**: Use `codestral-embed` (Mistral AI)
+- **Privacy/Offline**: Use `multilingual-e5-large` (Sentence Transformers)
+- **Fast/Lightweight**: Use `all-MiniLM-L6-v2` (Sentence Transformers)
+- **Multilingual Content**: Use `multilingual-e5-large` (Sentence Transformers)
+- **No API Costs**: Use any Sentence Transformers model
 
 ## 🚄 Performance & Optimization
 
@@ -264,11 +304,21 @@ This project features **cutting-edge deduplication** that's **5-15x faster** tha
 - Delay: 1 second between batches
 - Shorter retry delays
 
+**Sentence Transformers:**
+- No rate limits (local processing)
+- Batch size: 50 chunks (for memory management)
+- Processing speed depends on hardware (CPU/GPU)
+
 ### 🧠 Memory Usage
 
 - **Batched processing**: Prevents memory overflow
 - **Streaming embeddings**: Process chunks incrementally
 - **Automatic cleanup**: Temporary files removed
+
+**Local Models (Sentence Transformers):**
+- Model loaded once, reused for all chunks
+- Additional VRAM usage for GPU acceleration
+- Faster processing with dedicated GPU
 
 ## 📁 Project Structure
 

@@ -36,6 +36,14 @@ except ImportError:
     Mistral = None
     MISTRAL_AVAILABLE = False
 
+# Sentence Transformers imports (optional)
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SentenceTransformer = None
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
 
 class MistralEmbeddingClient:
     """
@@ -86,6 +94,88 @@ class MistralEmbeddingClient:
         return self.embed_documents([text])[0]
 
 
+class SentenceTransformerClient:
+    """
+    Sentence Transformers embedding client with batch processing support.
+
+    This class provides a unified interface for generating embeddings using 
+    Sentence Transformers models like all-MiniLM-L6-v2 (384d) and 
+    multilingual-e5-large (1024d). It handles model loading and provides
+    consistent embed_documents() and embed_query() methods.
+    """
+
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        """
+        Initialize Sentence Transformers embedding client.
+
+        Args:
+            model_name: Model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2', 
+                       'intfloat/multilingual-e5-large')
+        """
+        if not SENTENCE_TRANSFORMERS_AVAILABLE or SentenceTransformer is None:
+            raise ImportError(
+                "Sentence Transformers library not available. Install with: pip install sentence-transformers"
+            )
+
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name)
+        
+        # Get embedding dimension
+        self.embedding_dim = self.model.get_sentence_embedding_dimension()
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a list of documents."""
+        try:
+            # Handle multilingual-e5 models that benefit from prefixing
+            if "multilingual-e5" in self.model_name.lower():
+                # Add "passage:" prefix for better performance with e5 models
+                prefixed_texts = [f"passage: {text}" for text in texts]
+                embeddings = self.model.encode(prefixed_texts, convert_to_numpy=False)
+            else:
+                embeddings = self.model.encode(texts, convert_to_numpy=False)
+            
+            # Convert numpy arrays/tensors to lists of floats
+            result = []
+            if hasattr(embeddings, 'tolist'):
+                return embeddings.tolist()
+            
+            # Handle list of embeddings
+            for emb in embeddings:
+                if hasattr(emb, 'tolist'):
+                    result.append(emb.tolist())
+                elif hasattr(emb, '__iter__'):
+                    result.append([float(x) for x in emb])
+                else:
+                    result.append(emb)
+            return result
+
+        except Exception as e:
+            raise Exception(f"Sentence Transformers embedding error: {e}") from e
+
+    def embed_query(self, text: str) -> List[float]:
+        """Generate embedding for a single query."""
+        try:
+            # Handle multilingual-e5 models that benefit from prefixing
+            if "multilingual-e5" in self.model_name.lower():
+                # Add "query:" prefix for better performance with e5 models
+                prefixed_text = f"query: {text}"
+                embedding = self.model.encode([prefixed_text], convert_to_numpy=False)[0]
+            else:
+                embedding = self.model.encode([text], convert_to_numpy=False)[0]
+            
+            # Convert numpy array/tensor to list of floats
+            if hasattr(embedding, 'tolist'):
+                return embedding.tolist()
+            elif hasattr(embedding, '__iter__'):
+                return [float(x) for x in embedding]
+            else:
+                # Fallback: convert single value to list
+                return [float(embedding)]
+
+        except Exception as e:
+            raise Exception(f"Sentence Transformers embedding error: {e}") from e
+
+
 class GitHubToQdrantProcessor:
     """
     Main processor class for converting GitHub repositories to Qdrant vector collections.
@@ -119,6 +209,9 @@ class GitHubToQdrantProcessor:
         if provider == 'mistral_ai':
             model_name = self.config['mistral_ai']['model']
             print(f"🤖 Using embedding provider: Mistral AI ({model_name})")
+        elif provider == 'sentence_transformers':
+            model_name = self.config['sentence_transformers']['model']
+            print(f"🤖 Using embedding provider: Sentence Transformers ({model_name})")
         else:
             model_name = self.config['azure_openai']['deployment_name']
             print(f"🤖 Using embedding provider: Azure OpenAI ({model_name})")
@@ -190,6 +283,11 @@ class GitHubToQdrantProcessor:
                 model=mistral_config['model'],
                 output_dimension=mistral_config.get('output_dimension', 1536)
             )
+        elif provider == 'sentence_transformers':
+            st_config = self.config['sentence_transformers']
+            return SentenceTransformerClient(
+                model_name=st_config['model']
+            )
         else:
             # Default to Azure OpenAI
             azure_config = self.config['azure_openai']
@@ -237,7 +335,12 @@ class GitHubToQdrantProcessor:
         """Test connections to embedding provider and Qdrant."""
         # Test embedding provider connection
         provider = self.config.get('embedding_provider', 'azure_openai')
-        provider_name = "Mistral AI" if provider == 'mistral_ai' else "Azure OpenAI"
+        if provider == 'mistral_ai':
+            provider_name = "Mistral AI"
+        elif provider == 'sentence_transformers':
+            provider_name = "Sentence Transformers"
+        else:
+            provider_name = "Azure OpenAI"
 
         try:
             test_response = self.embeddings.embed_query("test connection")
@@ -798,13 +901,31 @@ class GitHubToQdrantProcessor:
                 "Dot": Distance.DOT
             }
 
-            self.qdrant_client.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(
-                    size=qdrant_config['vector_size'],
-                    distance=distance_map.get(qdrant_config['distance'], Distance.COSINE)
+            # Check if we should create named vectors for MCP compatibility
+            vector_name = qdrant_config.get('vector_name')
+            if vector_name:
+                print(f"   Creating named vector: {vector_name}")
+                # Create collection with named vectors
+                vectors_config = {
+                    vector_name: VectorParams(
+                        size=qdrant_config['vector_size'],
+                        distance=distance_map.get(qdrant_config['distance'], Distance.COSINE)
+                    )
+                }
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=vectors_config
                 )
-            )
+            else:
+                print(f"   Creating default (unnamed) vectors")
+                # Create collection with default vectors
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=qdrant_config['vector_size'],
+                        distance=distance_map.get(qdrant_config['distance'], Distance.COSINE)
+                    )
+                )
             print(f"✅ Collection '{collection_name}' created successfully")
         else:
             print(f"📚 Using existing collection: {collection_name}")
@@ -923,14 +1044,27 @@ class GitHubToQdrantProcessor:
                         "chunk_size": len(chunk.page_content),
                         "text_preview": chunk.page_content[:200] + "..." if len(chunk.page_content) > 200 else chunk.page_content,
                         "batch_number": batch_num,
-                        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8]  # Short hash for reference
+                        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],  # Short hash for reference
+                        "document": chunk.page_content,  # Full document content for MCP server compatibility
+                        "information": chunk.page_content  # Alternative field name that MCP server might expect
                     })
 
-                    points.append(PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload=metadata
-                    ))
+                    # Handle named vectors vs default vectors
+                    vector_name = self.config['qdrant'].get('vector_name')
+                    if vector_name:
+                        # Use named vectors - create dict for named vectors
+                        points.append(PointStruct(
+                            id=point_id,
+                            vector={vector_name: embedding},
+                            payload=metadata
+                        ))
+                    else:
+                        # Use default vectors - pass embedding directly
+                        points.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload=metadata
+                        ))
 
                 # Upload batch to Qdrant
                 self.qdrant_client.upsert(
