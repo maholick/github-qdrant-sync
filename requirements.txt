@@ -8,3 +8,9 @@ python-dotenv>=1.0.0
 
 # For Mistral AI embeddings support
 mistralai>=0.4.0
+
+# For local embeddings support (optional)
+sentence-transformers>=2.0.0
+
+# For code formatting and linting
+ruff>=0.1.0

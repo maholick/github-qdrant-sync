@@ -27,6 +27,16 @@ jobs:
         pip install -r requirements.txt
         pip install pylint
         
+    - name: Check formatting with Ruff
+      run: |
+        # Check if code is formatted properly
+        ruff format --check --diff .
+        
+    - name: Lint with Ruff
+      run: |
+        # Run ruff linting (fast replacement for flake8)
+        ruff check .
+        
     - name: Lint with pylint
       run: |
         # Run pylint with a reasonable threshold (8.0/10)
