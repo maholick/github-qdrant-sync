@@ -59,55 +59,55 @@ class ConfigLoader:
     Configuration loader supporting YAML (and JSON) formats with environment variable substitution.
     Primary format is YAML for better readability and environment variable support.
     """
-    
+
     @staticmethod
     def load_config(config_path: str) -> Dict[str, Any]:
         """
         Load configuration from YAML file with environment variable support.
         JSON format is also supported for backward compatibility.
-        
+
         Args:
             config_path: Path to configuration file (preferably .yaml)
-            
+
         Returns:
             Configuration dictionary with environment variables resolved
         """
         # Load environment variables from .env file if it exists
-        if os.path.exists('.env'):
-            load_dotenv('.env')
+        if os.path.exists(".env"):
+            load_dotenv(".env")
             print("📋 Loaded environment variables from .env file")
-        
+
         # Determine file format
         file_extension = os.path.splitext(config_path)[1].lower()
-        
+
         # Load configuration
-        with open(config_path, 'r') as f:
-            if file_extension in ['.yaml', '.yml']:
+        with open(config_path, "r") as f:
+            if file_extension in [".yaml", ".yml"]:
                 config = yaml.safe_load(f)
                 print(f"📋 Configuration loaded from: {config_path} (YAML)")
-            elif file_extension == '.json':
+            elif file_extension == ".json":
                 config = json.load(f)
                 print(f"📋 Configuration loaded from: {config_path} (JSON)")
             else:
                 raise ValueError(f"Unsupported configuration format: {file_extension}")
-        
+
         # Resolve environment variables
         config = ConfigLoader._resolve_env_vars(config)
-        
+
         return config
-    
+
     @staticmethod
     def _resolve_env_vars(obj: Any) -> Any:
         """
         Recursively resolve environment variables in configuration.
-        
+
         Supports formats:
         - ${VAR_NAME} - Basic substitution
         - ${VAR_NAME:-default} - With default value
-        
+
         Args:
             obj: Configuration object (dict, list, or string)
-            
+
         Returns:
             Configuration with environment variables resolved
         """
@@ -117,13 +117,13 @@ class ConfigLoader:
             return [ConfigLoader._resolve_env_vars(item) for item in obj]
         elif isinstance(obj, str):
             # Pattern to match ${VAR} or ${VAR:-default}
-            pattern = r'\$\{([^}]+)\}'
-            
+            pattern = r"\$\{([^}]+)\}"
+
             def replacer(match):
                 var_expr = match.group(1)
                 # Check for default value syntax
-                if ':-' in var_expr:
-                    var_name, default_value = var_expr.split(':-', 1)
+                if ":-" in var_expr:
+                    var_name, default_value = var_expr.split(":-", 1)
                     return os.getenv(var_name, default_value)
                 else:
                     value = os.getenv(var_expr)
@@ -131,7 +131,7 @@ class ConfigLoader:
                         # Keep original if env var not found (for backward compatibility)
                         return match.group(0)
                     return value
-            
+
             return re.sub(pattern, replacer, obj)
         else:
             return obj
@@ -404,7 +404,7 @@ class GitHubToQdrantProcessor:
         2. Reverse proxy: HTTPS connection through reverse proxy (port 443)
         3. Direct connection: Standard Qdrant port (6333 or custom)
         4. URL mode: Direct URL-based connection
-        
+
         Config options:
         - connection_method: "auto" (default), "reverse_proxy", "direct", "url"
         - url: Full URL for Qdrant (e.g., "https://qdrant.example.com")
@@ -416,7 +416,7 @@ class GitHubToQdrantProcessor:
         """
         qdrant_config = self.config["qdrant"]
         connection_method = qdrant_config.get("connection_method", "auto")
-        
+
         # Helper function to test connection
         def test_client(client: QdrantClient, method_name: str) -> bool:
             try:
@@ -425,29 +425,33 @@ class GitHubToQdrantProcessor:
                 return True
             except Exception:
                 return False
-        
+
         # Get connection parameters
         url = qdrant_config.get("url", "")
         api_key = qdrant_config.get("api_key")
         timeout = qdrant_config.get("timeout", 30)
-        
+
         # Parse URL components if URL is provided
         hostname = ""
         default_port = 6333  # Default Qdrant port
         use_https = False
-        
+
         if url:
             if url.startswith("https://"):
                 use_https = True
                 hostname = url.replace("https://", "").split("/")[0].split(":")[0]
                 # Check if custom port is specified in URL
                 if ":" in url.replace("https://", "").split("/")[0]:
-                    custom_port = int(url.replace("https://", "").split(":")[1].split("/")[0])
+                    custom_port = int(
+                        url.replace("https://", "").split(":")[1].split("/")[0]
+                    )
                     default_port = custom_port
             elif url.startswith("http://"):
                 hostname = url.replace("http://", "").split("/")[0].split(":")[0]
                 if ":" in url.replace("http://", "").split("/")[0]:
-                    default_port = int(url.replace("http://", "").split(":")[1].split("/")[0])
+                    default_port = int(
+                        url.replace("http://", "").split(":")[1].split("/")[0]
+                    )
             else:
                 # Assume it's just a hostname or hostname:port
                 if ":" in url:
@@ -455,53 +459,97 @@ class GitHubToQdrantProcessor:
                     default_port = int(url.split(":")[1])
                 else:
                     hostname = url
-        
+
         # Use explicit host/port if provided in config
         hostname = qdrant_config.get("host", hostname)
         port = qdrant_config.get("port", default_port)
-        
+
         # Connection attempts based on method
         attempts = []
-        
+
         if connection_method == "auto":
             print("🔍 Auto-detecting Qdrant connection method...")
             # Try reverse proxy first (most common for cloud services)
             if use_https:
-                attempts.append(("reverse_proxy", lambda: QdrantClient(
-                    host=hostname, port=443, api_key=api_key,
-                    https=True, timeout=timeout, prefer_grpc=False
-                )))
+                attempts.append(
+                    (
+                        "reverse_proxy",
+                        lambda: QdrantClient(
+                            host=hostname,
+                            port=443,
+                            api_key=api_key,
+                            https=True,
+                            timeout=timeout,
+                            prefer_grpc=False,
+                        ),
+                    )
+                )
             # Try direct connection with default or specified port
-            attempts.append(("direct", lambda: QdrantClient(
-                host=hostname, port=port, api_key=api_key,
-                https=use_https, timeout=timeout
-            )))
+            attempts.append(
+                (
+                    "direct",
+                    lambda: QdrantClient(
+                        host=hostname,
+                        port=port,
+                        api_key=api_key,
+                        https=use_https,
+                        timeout=timeout,
+                    ),
+                )
+            )
             # Try URL-based if URL provided
             if url:
-                attempts.append(("url", lambda: QdrantClient(
-                    url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
-                )))
-        
+                attempts.append(
+                    (
+                        "url",
+                        lambda: QdrantClient(
+                            url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
+                        ),
+                    )
+                )
+
         elif connection_method == "reverse_proxy":
-            attempts.append(("reverse_proxy", lambda: QdrantClient(
-                host=hostname, port=443, api_key=api_key,
-                https=True, timeout=timeout, prefer_grpc=False
-            )))
-        
+            attempts.append(
+                (
+                    "reverse_proxy",
+                    lambda: QdrantClient(
+                        host=hostname,
+                        port=443,
+                        api_key=api_key,
+                        https=True,
+                        timeout=timeout,
+                        prefer_grpc=False,
+                    ),
+                )
+            )
+
         elif connection_method == "direct":
-            attempts.append(("direct", lambda: QdrantClient(
-                host=hostname, port=port, api_key=api_key,
-                https=use_https, timeout=timeout
-            )))
-        
+            attempts.append(
+                (
+                    "direct",
+                    lambda: QdrantClient(
+                        host=hostname,
+                        port=port,
+                        api_key=api_key,
+                        https=use_https,
+                        timeout=timeout,
+                    ),
+                )
+            )
+
         elif connection_method == "url":
-            attempts.append(("url", lambda: QdrantClient(
-                url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
-            )))
-        
+            attempts.append(
+                (
+                    "url",
+                    lambda: QdrantClient(
+                        url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
+                    ),
+                )
+            )
+
         else:
             raise ValueError(f"Unknown connection_method: {connection_method}")
-        
+
         # Try each connection method
         last_error = None
         for method_name, client_factory in attempts:
@@ -509,13 +557,15 @@ class GitHubToQdrantProcessor:
                 client = client_factory()
                 if test_client(client, method_name):
                     if connection_method == "auto":
-                        print(f"💡 Add \"connection_method\": \"{method_name}\" to config for faster startup")
+                        print(
+                            f'💡 Add "connection_method": "{method_name}" to config for faster startup'
+                        )
                     return client
             except Exception as e:
                 last_error = e
                 if connection_method != "auto":
                     print(f"  ✗ Failed with {method_name}: {str(e)[:60]}")
-        
+
         # If all methods fail, provide helpful error message
         raise ConnectionError(
             f"Failed to connect to Qdrant.\n"
@@ -584,7 +634,7 @@ class GitHubToQdrantProcessor:
 
         # Handle authentication for private repositories
         auth_repo_url = repo_url
-        
+
         # Check if using SSH URL (git@github.com:...)
         if repo_url.startswith("git@github.com:"):
             print("🔑 Using SSH authentication (no token needed)")
@@ -599,9 +649,7 @@ class GitHubToQdrantProcessor:
 
                 parsed = urlparse(repo_url)
                 if parsed.hostname == "github.com":
-                    auth_repo_url = (
-                        f"https://{token}@github.com{parsed.path}"
-                    )
+                    auth_repo_url = f"https://{token}@github.com{parsed.path}"
                 print("🔐 Using GitHub token for HTTPS authentication")
             elif token and token.startswith("${"):
                 print("⚠️  No GitHub token configured - using public access")
@@ -649,7 +697,7 @@ class GitHubToQdrantProcessor:
             List of paths to discovered text files
         """
         file_mode = self.config["processing"].get("file_mode", "markdown_only")
-        
+
         if file_mode == "all_text":
             print("\n🔍 Searching for all text-based files...")
             extensions = self.config["processing"].get("text_extensions", [])
@@ -679,8 +727,11 @@ class GitHubToQdrantProcessor:
 
             for file in files:
                 # Check if file has one of the specified extensions or matches no-extension names
-                if (any(file.lower().endswith(ext) for ext in extensions if ext.startswith(".")) or
-                    (file in no_ext_names)):
+                if any(
+                    file.lower().endswith(ext)
+                    for ext in extensions
+                    if ext.startswith(".")
+                ) or (file in no_ext_names):
                     file_path = os.path.join(root, file)
                     # Check if file path contains any exclude patterns
                     if not any(pattern in file_path for pattern in exclude_patterns):
@@ -798,14 +849,16 @@ class GitHubToQdrantProcessor:
 
         # Initialize PDF processor once if needed
         pdf_processor = None
-        if self.config.get('pdf_processing', {}).get('enabled', False):
+        if self.config.get("pdf_processing", {}).get("enabled", False):
             pdf_processor = PDFProcessor(self.config, self.logger)
             print("   📑 PDF processing enabled")
-        
+
         # Process root files first
         if root_files:
             print(f"\n📝 Processing {len(root_files)} root-level files...")
-            root_content = self._combine_files_in_group(root_files, "root", repo_root, pdf_processor)
+            root_content = self._combine_files_in_group(
+                root_files, "root", repo_root, pdf_processor
+            )
             root_file_path = os.path.join(output_dir, f"{repo_name}_root.md")
             with open(root_file_path, "w", encoding="utf-8") as f:
                 f.write(root_content)
@@ -820,7 +873,9 @@ class GitHubToQdrantProcessor:
         # Process each folder
         for folder_name, files in folder_groups.items():
             print(f"\n📝 Processing folder '{folder_name}' with {len(files)} files...")
-            folder_content = self._combine_files_in_group(files, folder_name, repo_root, pdf_processor)
+            folder_content = self._combine_files_in_group(
+                files, folder_name, repo_root, pdf_processor
+            )
 
             # Save folder-specific combined file
             folder_file_path = os.path.join(output_dir, f"{folder_name}.md")
@@ -869,17 +924,17 @@ class GitHubToQdrantProcessor:
         for text_file in sorted(files):
             try:
                 relative_path = os.path.relpath(text_file, repo_root)
-                
+
                 # Check if file is a PDF
-                if text_file.lower().endswith('.pdf') and pdf_processor:
+                if text_file.lower().endswith(".pdf") and pdf_processor:
                     print(f"   📑 Processing PDF: {os.path.basename(text_file)}")
                     pdf_docs = pdf_processor.process_pdf(text_file)
-                    
+
                     if pdf_docs:
                         content_parts.append(f"### File: {relative_path} [PDF]\n\n")
                         # Combine all pages from PDF
                         for doc in pdf_docs:
-                            page_num = doc.metadata.get('page', '')
+                            page_num = doc.metadata.get("page", "")
                             if page_num:
                                 content_parts.append(f"#### Page {page_num}\n\n")
                             content_parts.append(doc.page_content)
@@ -891,7 +946,7 @@ class GitHubToQdrantProcessor:
                     # Regular text file processing
                     with open(text_file, "r", encoding="utf-8", errors="ignore") as f:
                         file_content = f.read()
-                    
+
                     content_parts.append(f"### File: {relative_path}\n\n")
                     content_parts.append(file_content)
                     content_parts.append("\n\n")
@@ -1388,12 +1443,10 @@ class GitHubToQdrantProcessor:
                     payload = {
                         # Root level content for n8n compatibility
                         "content": chunk.page_content,  # Primary content field for n8n
-                        "text": chunk.page_content,     # Alternative field name some systems use
-                        
+                        "text": chunk.page_content,  # Alternative field name some systems use
                         # Standard fields for other systems
                         "page_content": chunk.page_content,  # LangChain standard field
-                        "document": chunk.page_content,      # MCP server compatibility
-                        
+                        "document": chunk.page_content,  # MCP server compatibility
                         # Metadata as separate field
                         "metadata": {
                             **chunk.metadata,  # Original metadata (source, repository, branch, etc.)
@@ -1407,13 +1460,12 @@ class GitHubToQdrantProcessor:
                                 chunk.page_content.encode()
                             ).hexdigest()[:8],  # Short hash for reference
                         },
-                        
                         # Also include key metadata at root level for easier access
                         "repository": chunk.metadata.get("repository"),
                         "branch": chunk.metadata.get("branch"),
                         "source": chunk.metadata.get("source"),
                         "chunk_id": chunk_index,
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
                     }
 
                     # Handle named vectors vs default vectors
@@ -1507,15 +1559,15 @@ class GitHubToQdrantProcessor:
                 text_files = self._find_text_files(clone_path)
 
                 if not text_files:
-                    file_mode = self.config["processing"].get("file_mode", "markdown_only")
+                    file_mode = self.config["processing"].get(
+                        "file_mode", "markdown_only"
+                    )
                     file_type = "text" if file_mode == "all_text" else "markdown"
                     print(f"⚠️  No {file_type} files found in repository")
                     return
 
                 # Combine text files into folder-based files + overall combined file
-                combined_content = self._combine_text_files(
-                    text_files, repo_name
-                )
+                combined_content = self._combine_text_files(text_files, repo_name)
 
                 # Setup Qdrant collection
                 self._setup_qdrant_collection()
@@ -1561,13 +1613,11 @@ def main():
         description="Process GitHub repository text files into Qdrant vector database"
     )
     parser.add_argument(
-        "config", 
-        help="Path to configuration file (YAML format recommended, JSON supported)"
+        "config",
+        help="Path to configuration file (YAML format recommended, JSON supported)",
     )
     parser.add_argument(
-        "--repo-url", 
-        help="GitHub repository URL (overrides config file)", 
-        default=None
+        "--repo-url", help="GitHub repository URL (overrides config file)", default=None
     )
 
     args = parser.parse_args()
