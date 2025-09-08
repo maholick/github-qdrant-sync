@@ -1,16 +1,22 @@
 langchain>=0.1.0
 langchain-openai>=0.1.0
+langchain-community>=0.1.0
 qdrant-client>=1.7.0
 openai>=1.0.0
 tiktoken>=0.5.0
 numpy>=1.24.0
 python-dotenv>=1.0.0
+pyyaml>=6.0.0
 
-# For Mistral AI embeddings support
+# For Mistral AI embeddings and OCR support
 mistralai>=0.4.0
 
 # For local embeddings support (optional)
 sentence-transformers>=2.0.0
+
+# For PDF processing
+pymupdf>=1.24.0  # Fast PDF extraction (PyMuPDF/fitz)
+pypdf>=3.17.0    # Alternative PDF extraction
 
 # For code formatting and linting
 ruff>=0.1.0
