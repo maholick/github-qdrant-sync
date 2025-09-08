@@ -119,7 +119,7 @@ class PDFProcessor:
             return self._process_cloud(file_path)
         if self.mode == "hybrid":
             return self._process_hybrid(file_path)
-        
+
         self.logger.warning(f"Unknown mode: {self.mode}, using local")
         return self._process_local(file_path)
 
