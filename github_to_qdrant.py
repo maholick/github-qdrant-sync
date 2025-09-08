@@ -2,9 +2,9 @@
 """
 GitHub Repository to Qdrant Vector Database Processor
 
-This script clones a GitHub repository, extracts all markdown files,
+This script clones a GitHub repository, extracts text-based files (configurable),
 combines them into a single document, and inserts them into a Qdrant collection
-using Azure OpenAI embeddings.
+using various embedding providers (Azure OpenAI, Mistral AI, or Sentence Transformers).
 """
 
 import argparse
@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,12 +22,18 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 
+import yaml
+from dotenv import load_dotenv
+
 import numpy as np
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import AzureOpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+
+# Import PDF processor
+from pdf_processor import PDFProcessor
 
 # Mistral AI imports (optional)
 try:
@@ -45,6 +52,89 @@ try:
 except ImportError:
     SentenceTransformer = None
     SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+
+class ConfigLoader:
+    """
+    Configuration loader supporting YAML (and JSON) formats with environment variable substitution.
+    Primary format is YAML for better readability and environment variable support.
+    """
+    
+    @staticmethod
+    def load_config(config_path: str) -> Dict[str, Any]:
+        """
+        Load configuration from YAML file with environment variable support.
+        JSON format is also supported for backward compatibility.
+        
+        Args:
+            config_path: Path to configuration file (preferably .yaml)
+            
+        Returns:
+            Configuration dictionary with environment variables resolved
+        """
+        # Load environment variables from .env file if it exists
+        if os.path.exists('.env'):
+            load_dotenv('.env')
+            print("📋 Loaded environment variables from .env file")
+        
+        # Determine file format
+        file_extension = os.path.splitext(config_path)[1].lower()
+        
+        # Load configuration
+        with open(config_path, 'r') as f:
+            if file_extension in ['.yaml', '.yml']:
+                config = yaml.safe_load(f)
+                print(f"📋 Configuration loaded from: {config_path} (YAML)")
+            elif file_extension == '.json':
+                config = json.load(f)
+                print(f"📋 Configuration loaded from: {config_path} (JSON)")
+            else:
+                raise ValueError(f"Unsupported configuration format: {file_extension}")
+        
+        # Resolve environment variables
+        config = ConfigLoader._resolve_env_vars(config)
+        
+        return config
+    
+    @staticmethod
+    def _resolve_env_vars(obj: Any) -> Any:
+        """
+        Recursively resolve environment variables in configuration.
+        
+        Supports formats:
+        - ${VAR_NAME} - Basic substitution
+        - ${VAR_NAME:-default} - With default value
+        
+        Args:
+            obj: Configuration object (dict, list, or string)
+            
+        Returns:
+            Configuration with environment variables resolved
+        """
+        if isinstance(obj, dict):
+            return {k: ConfigLoader._resolve_env_vars(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [ConfigLoader._resolve_env_vars(item) for item in obj]
+        elif isinstance(obj, str):
+            # Pattern to match ${VAR} or ${VAR:-default}
+            pattern = r'\$\{([^}]+)\}'
+            
+            def replacer(match):
+                var_expr = match.group(1)
+                # Check for default value syntax
+                if ':-' in var_expr:
+                    var_name, default_value = var_expr.split(':-', 1)
+                    return os.getenv(var_name, default_value)
+                else:
+                    value = os.getenv(var_expr)
+                    if value is None:
+                        # Keep original if env var not found (for backward compatibility)
+                        return match.group(0)
+                    return value
+            
+            return re.sub(pattern, replacer, obj)
+        else:
+            return obj
 
 
 class MistralEmbeddingClient:
@@ -188,8 +278,8 @@ class GitHubToQdrantProcessor:
     Main processor class for converting GitHub repositories to Qdrant vector collections.
 
     This class orchestrates the entire pipeline: clones GitHub repositories, extracts
-    markdown files, combines them into structured documents, generates embeddings using
-    Azure OpenAI or Mistral AI, performs deduplication, and uploads to Qdrant.
+    text files (markdown or all text types), combines them into structured documents, generates embeddings using
+    Azure OpenAI, Mistral AI, or Sentence Transformers, performs deduplication, and uploads to Qdrant.
 
     Key features:
     - Supports both Azure OpenAI and Mistral AI embedding providers
@@ -208,7 +298,6 @@ class GitHubToQdrantProcessor:
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
 
-        print(f"📋 Configuration loaded from: {config_path}")
         print(f"🎯 Target collection: {self.config['qdrant']['collection_name']}")
 
         # Display embedding provider info
@@ -253,16 +342,15 @@ class GitHubToQdrantProcessor:
         )
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
-        """Load configuration from JSON file."""
+        """Load configuration from YAML file with environment variable support."""
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return ConfigLoader.load_config(config_path)
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"Configuration file not found: {config_path}"
             ) from None
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in configuration file: {e}") from e
+        except (json.JSONDecodeError, yaml.YAMLError) as e:
+            raise ValueError(f"Invalid configuration file format: {e}") from e
 
     def _setup_logging(self) -> None:
         """Setup logging configuration."""
@@ -309,34 +397,133 @@ class GitHubToQdrantProcessor:
 
     def _initialize_qdrant(self) -> QdrantClient:
         """
-        Initialize Qdrant client with flexible configuration support.
+        Initialize Qdrant client with auto-detection and flexible configuration.
 
-        Supports both URL-based connections (for Qdrant Cloud) and host/port
-        configurations (for self-hosted instances). Handles API key authentication
-        for secure connections.
+        Supports multiple connection methods with auto-detection:
+        1. Auto mode: Tries multiple connection methods automatically
+        2. Reverse proxy: HTTPS connection through reverse proxy (port 443)
+        3. Direct connection: Standard Qdrant port (6333 or custom)
+        4. URL mode: Direct URL-based connection
+        
+        Config options:
+        - connection_method: "auto" (default), "reverse_proxy", "direct", "url"
+        - url: Full URL for Qdrant (e.g., "https://qdrant.example.com")
+        - host: Hostname for direct connection
+        - port: Port for direct connection (default: 6333)
 
         Returns:
             Configured QdrantClient instance
         """
         qdrant_config = self.config["qdrant"]
-
-        # Support both URL and host/port configurations
-        if "url" in qdrant_config:
-            return QdrantClient(
-                url=qdrant_config["url"], api_key=qdrant_config.get("api_key")
-            )
-        else:
-            # Fallback to host/port configuration
-            if qdrant_config.get("api_key"):
-                return QdrantClient(
-                    host=qdrant_config["host"],
-                    port=qdrant_config["port"],
-                    api_key=qdrant_config["api_key"],
-                )
+        connection_method = qdrant_config.get("connection_method", "auto")
+        
+        # Helper function to test connection
+        def test_client(client: QdrantClient, method_name: str) -> bool:
+            try:
+                client.get_collections()
+                print(f"  ✓ Connected using {method_name}")
+                return True
+            except Exception:
+                return False
+        
+        # Get connection parameters
+        url = qdrant_config.get("url", "")
+        api_key = qdrant_config.get("api_key")
+        timeout = qdrant_config.get("timeout", 30)
+        
+        # Parse URL components if URL is provided
+        hostname = ""
+        default_port = 6333  # Default Qdrant port
+        use_https = False
+        
+        if url:
+            if url.startswith("https://"):
+                use_https = True
+                hostname = url.replace("https://", "").split("/")[0].split(":")[0]
+                # Check if custom port is specified in URL
+                if ":" in url.replace("https://", "").split("/")[0]:
+                    custom_port = int(url.replace("https://", "").split(":")[1].split("/")[0])
+                    default_port = custom_port
+            elif url.startswith("http://"):
+                hostname = url.replace("http://", "").split("/")[0].split(":")[0]
+                if ":" in url.replace("http://", "").split("/")[0]:
+                    default_port = int(url.replace("http://", "").split(":")[1].split("/")[0])
             else:
-                return QdrantClient(
-                    host=qdrant_config["host"], port=qdrant_config["port"]
-                )
+                # Assume it's just a hostname or hostname:port
+                if ":" in url:
+                    hostname = url.split(":")[0]
+                    default_port = int(url.split(":")[1])
+                else:
+                    hostname = url
+        
+        # Use explicit host/port if provided in config
+        hostname = qdrant_config.get("host", hostname)
+        port = qdrant_config.get("port", default_port)
+        
+        # Connection attempts based on method
+        attempts = []
+        
+        if connection_method == "auto":
+            print("🔍 Auto-detecting Qdrant connection method...")
+            # Try reverse proxy first (most common for cloud services)
+            if use_https:
+                attempts.append(("reverse_proxy", lambda: QdrantClient(
+                    host=hostname, port=443, api_key=api_key,
+                    https=True, timeout=timeout, prefer_grpc=False
+                )))
+            # Try direct connection with default or specified port
+            attempts.append(("direct", lambda: QdrantClient(
+                host=hostname, port=port, api_key=api_key,
+                https=use_https, timeout=timeout
+            )))
+            # Try URL-based if URL provided
+            if url:
+                attempts.append(("url", lambda: QdrantClient(
+                    url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
+                )))
+        
+        elif connection_method == "reverse_proxy":
+            attempts.append(("reverse_proxy", lambda: QdrantClient(
+                host=hostname, port=443, api_key=api_key,
+                https=True, timeout=timeout, prefer_grpc=False
+            )))
+        
+        elif connection_method == "direct":
+            attempts.append(("direct", lambda: QdrantClient(
+                host=hostname, port=port, api_key=api_key,
+                https=use_https, timeout=timeout
+            )))
+        
+        elif connection_method == "url":
+            attempts.append(("url", lambda: QdrantClient(
+                url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
+            )))
+        
+        else:
+            raise ValueError(f"Unknown connection_method: {connection_method}")
+        
+        # Try each connection method
+        last_error = None
+        for method_name, client_factory in attempts:
+            try:
+                client = client_factory()
+                if test_client(client, method_name):
+                    if connection_method == "auto":
+                        print(f"💡 Add \"connection_method\": \"{method_name}\" to config for faster startup")
+                    return client
+            except Exception as e:
+                last_error = e
+                if connection_method != "auto":
+                    print(f"  ✗ Failed with {method_name}: {str(e)[:60]}")
+        
+        # If all methods fail, provide helpful error message
+        raise ConnectionError(
+            f"Failed to connect to Qdrant.\n"
+            f"Connection method: {connection_method}\n"
+            f"URL: {url}\n"
+            f"Last error: {last_error}\n"
+            f"Try setting 'connection_method' to 'reverse_proxy', 'direct', or 'url'"
+        )
 
     def _test_connections(self) -> None:
         """Test connections to embedding provider and Qdrant."""
@@ -397,16 +584,29 @@ class GitHubToQdrantProcessor:
 
         # Handle authentication for private repositories
         auth_repo_url = repo_url
-        if self.config["github"].get("token"):
-            # Insert token into URL for private repo access
-            from urllib.parse import urlparse
+        
+        # Check if using SSH URL (git@github.com:...)
+        if repo_url.startswith("git@github.com:"):
+            print("🔑 Using SSH authentication (no token needed)")
+            auth_repo_url = repo_url
+        else:
+            # HTTPS URL - check for token
+            token = self.config["github"].get("token")
+            # Check if token exists and is not an unresolved placeholder
+            if token and not token.startswith("${"):
+                # Insert token into URL for private repo access
+                from urllib.parse import urlparse
 
-            parsed = urlparse(repo_url)
-            if parsed.hostname == "github.com":
-                auth_repo_url = (
-                    f"https://{self.config['github']['token']}@github.com{parsed.path}"
-                )
-            print("🔐 Using GitHub token for authentication")
+                parsed = urlparse(repo_url)
+                if parsed.hostname == "github.com":
+                    auth_repo_url = (
+                        f"https://{token}@github.com{parsed.path}"
+                    )
+                print("🔐 Using GitHub token for HTTPS authentication")
+            elif token and token.startswith("${"):
+                print("⚠️  No GitHub token configured - using public access")
+                print("    For private repos via HTTPS, set GITHUB_TOKEN in .env")
+                print("    Or use SSH URL format: git@github.com:owner/repo.git")
 
         cmd = ["git", "clone"]
         if self.config["github"]["clone_depth"]:
@@ -432,27 +632,43 @@ class GitHubToQdrantProcessor:
             print(f"❌ Failed to clone repository: {e.stderr}")
             raise
 
-    def _find_markdown_files(self, directory: str) -> List[str]:
+    def _find_text_files(self, directory: str) -> List[str]:
         """
-        Recursively find all markdown files with configurable filtering.
+        Recursively find text files based on configuration mode.
 
         Searches through directory structure while respecting exclude patterns
         to skip unwanted directories (e.g., node_modules, .git) and files.
-        Supports multiple markdown file extensions (.md, .markdown, etc.).
+        Supports two modes:
+        - markdown_only: Only processes markdown files
+        - all_text: Processes all text-based files (code, config, docs, etc.)
 
         Args:
             directory: Root directory to search
 
         Returns:
-            List of paths to discovered markdown files
+            List of paths to discovered text files
         """
-        print("\n🔍 Searching for markdown files...")
+        file_mode = self.config["processing"].get("file_mode", "markdown_only")
+        
+        if file_mode == "all_text":
+            print("\n🔍 Searching for all text-based files...")
+            extensions = self.config["processing"].get("text_extensions", [])
+            # Also check for files without extensions that are commonly text files
+            no_ext_names = [f for f in extensions if not f.startswith(".")]
+        else:
+            print("\n🔍 Searching for markdown files...")
+            extensions = self.config["processing"]["markdown_extensions"]
+            no_ext_names = []
 
-        markdown_files = []
-        extensions = self.config["processing"]["markdown_extensions"]
+        text_files = []
         exclude_patterns = self.config["processing"]["exclude_patterns"]
 
-        print(f"📝 Looking for extensions: {', '.join(extensions)}")
+        # Only show first 10 extensions for readability
+        ext_display = [e for e in extensions if e.startswith(".")][:10]
+        if len([e for e in extensions if e.startswith(".")]) > 10:
+            print(f"📝 Looking for extensions: {', '.join(ext_display)}... and more")
+        else:
+            print(f"📝 Looking for extensions: {', '.join(ext_display)}")
         print(f"🚫 Excluding patterns: {', '.join(exclude_patterns)}")
 
         for root, dirs, files in os.walk(directory):
@@ -462,16 +678,19 @@ class GitHubToQdrantProcessor:
             ]
 
             for file in files:
-                if any(file.lower().endswith(ext) for ext in extensions):
+                # Check if file has one of the specified extensions or matches no-extension names
+                if (any(file.lower().endswith(ext) for ext in extensions if ext.startswith(".")) or
+                    (file in no_ext_names)):
                     file_path = os.path.join(root, file)
                     # Check if file path contains any exclude patterns
                     if not any(pattern in file_path for pattern in exclude_patterns):
-                        markdown_files.append(file_path)
+                        text_files.append(file_path)
 
-        print(f"✅ Found {len(markdown_files)} markdown files")
-        if len(markdown_files) > 0:
-            print(f"📊 File size range: {self._get_file_size_stats(markdown_files)}")
-        return markdown_files
+        file_type = "text" if file_mode == "all_text" else "markdown"
+        print(f"✅ Found {len(text_files)} {file_type} files")
+        if len(text_files) > 0:
+            print(f"📊 File size range: {self._get_file_size_stats(text_files)}")
+        return text_files
 
     def _get_file_size_stats(self, file_paths: List[str]) -> str:
         """Get file size statistics for display."""
@@ -492,12 +711,12 @@ class GitHubToQdrantProcessor:
 
         return f"{min_size:.1f}KB - {max_size:.1f}KB (Total: {total_size:.1f}MB)"
 
-    def _combine_markdown_files(self, markdown_files: List[str], repo_name: str) -> str:
+    def _combine_text_files(self, text_files: List[str], repo_name: str) -> str:
         """
-        Combine markdown files into structured documents organized by folder hierarchy.
+        Combine text files into structured documents organized by folder hierarchy.
 
         Creates multiple output files:
-        1. Individual folder-based markdown files (e.g., 'api.md', 'guides.md')
+        1. Individual folder-based combined files (e.g., 'api.md', 'guides.md')
         2. Root-level files combined into '{repo_name}_root.md'
         3. Master combined file containing all content with folder sections
 
@@ -506,13 +725,15 @@ class GitHubToQdrantProcessor:
         logical content boundaries.
 
         Args:
-            markdown_files: List of discovered markdown file paths
+            text_files: List of discovered text file paths
             repo_name: Repository name for output file naming
 
         Returns:
-            Complete combined markdown content string
+            Complete combined text content string
         """
-        print(f"\n📄 Combining {len(markdown_files)} markdown files by folder...")
+        file_mode = self.config["processing"].get("file_mode", "markdown_only")
+        file_type = "text" if file_mode == "all_text" else "markdown"
+        print(f"\n📄 Combining {len(text_files)} {file_type} files by folder...")
 
         # Create output directory
         output_dir = os.path.join(self.config["output"]["base_directory"], repo_name)
@@ -520,7 +741,7 @@ class GitHubToQdrantProcessor:
         print(f"📁 Output directory: {output_dir}")
 
         # Group files by top-level folder
-        repo_root = os.path.dirname(markdown_files[0]) if markdown_files else ""
+        repo_root = os.path.dirname(text_files[0]) if text_files else ""
         # Find the actual repository root by going up until we find .git or reach reasonable depth
         temp_root = repo_root
         for _ in range(10):  # Max 10 levels up
@@ -536,19 +757,19 @@ class GitHubToQdrantProcessor:
         root_files = []
 
         print("📂 Grouping files by top-level folders...")
-        for md_file in markdown_files:
-            relative_path = os.path.relpath(md_file, repo_root)
+        for text_file in text_files:
+            relative_path = os.path.relpath(text_file, repo_root)
             path_parts = relative_path.split(os.sep)
 
             if len(path_parts) == 1:
                 # File is in root directory
-                root_files.append(md_file)
+                root_files.append(text_file)
             else:
                 # File is in a subdirectory
                 top_folder = path_parts[0]
                 if top_folder not in folder_groups:
                     folder_groups[top_folder] = []
-                folder_groups[top_folder].append(md_file)
+                folder_groups[top_folder].append(text_file)
 
         print(f"📊 Found {len(folder_groups)} folders and {len(root_files)} root files")
         for folder, files in folder_groups.items():
@@ -559,13 +780,13 @@ class GitHubToQdrantProcessor:
         # Create combined files for each folder
         all_combined_content = []
         all_combined_content.append(
-            f"# Combined Markdown Documentation for {repo_name}\n\n"
+            f"# Combined {file_type.capitalize()} Documentation for {repo_name}\n\n"
         )
         all_combined_content.append(
-            "This document contains all markdown files from the repository, organized by folder.\n\n"
+            f"This document contains all {file_type} files from the repository, organized by folder.\n\n"
         )
         all_combined_content.append(
-            f"📊 **Statistics**: {len(markdown_files)} files from {len(folder_groups)} folders\n"
+            f"📊 **Statistics**: {len(text_files)} files from {len(folder_groups)} folders\n"
         )
         all_combined_content.append(
             f"🕒 **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -575,10 +796,16 @@ class GitHubToQdrantProcessor:
         successful_reads = 0
         total_chars = 0
 
+        # Initialize PDF processor once if needed
+        pdf_processor = None
+        if self.config.get('pdf_processing', {}).get('enabled', False):
+            pdf_processor = PDFProcessor(self.config, self.logger)
+            print("   📑 PDF processing enabled")
+        
         # Process root files first
         if root_files:
             print(f"\n📝 Processing {len(root_files)} root-level files...")
-            root_content = self._combine_files_in_group(root_files, "root", repo_root)
+            root_content = self._combine_files_in_group(root_files, "root", repo_root, pdf_processor)
             root_file_path = os.path.join(output_dir, f"{repo_name}_root.md")
             with open(root_file_path, "w", encoding="utf-8") as f:
                 f.write(root_content)
@@ -593,7 +820,7 @@ class GitHubToQdrantProcessor:
         # Process each folder
         for folder_name, files in folder_groups.items():
             print(f"\n📝 Processing folder '{folder_name}' with {len(files)} files...")
-            folder_content = self._combine_files_in_group(files, folder_name, repo_root)
+            folder_content = self._combine_files_in_group(files, folder_name, repo_root, pdf_processor)
 
             # Save folder-specific combined file
             folder_file_path = os.path.join(output_dir, f"{folder_name}.md")
@@ -621,9 +848,9 @@ class GitHubToQdrantProcessor:
             len(folder_groups) + (1 if root_files else 0) + 1
         )  # +1 for combined file
 
-        print("\n✅ Markdown combination completed!")
+        print(f"\n✅ {file_type.capitalize()} combination completed!")
         print("📊 Summary:")
-        print(f"   Files processed: {successful_reads}/{len(markdown_files)}")
+        print(f"   Files processed: {successful_reads}/{len(text_files)}")
         print(f"   Created files: {created_files} (folder files + combined)")
         print(
             f"   Combined file: {os.path.basename(combined_file_path)} ({file_size_mb:.2f}MB)"
@@ -633,24 +860,44 @@ class GitHubToQdrantProcessor:
         return "".join(all_combined_content)
 
     def _combine_files_in_group(
-        self, files: List[str], group_name: str, repo_root: str
+        self, files: List[str], group_name: str, repo_root: str, pdf_processor=None
     ) -> str:
-        """Combine files within a specific group/folder."""
+        """Combine files within a specific group/folder, including PDF processing."""
         content_parts = []
         content_parts.append(f"## Files in {group_name}\n\n")
 
-        for md_file in sorted(files):
+        for text_file in sorted(files):
             try:
-                with open(md_file, "r", encoding="utf-8", errors="ignore") as f:
-                    file_content = f.read()
-
-                relative_path = os.path.relpath(md_file, repo_root)
-                content_parts.append(f"### File: {relative_path}\n\n")
-                content_parts.append(file_content)
-                content_parts.append("\n\n")
+                relative_path = os.path.relpath(text_file, repo_root)
+                
+                # Check if file is a PDF
+                if text_file.lower().endswith('.pdf') and pdf_processor:
+                    print(f"   📑 Processing PDF: {os.path.basename(text_file)}")
+                    pdf_docs = pdf_processor.process_pdf(text_file)
+                    
+                    if pdf_docs:
+                        content_parts.append(f"### File: {relative_path} [PDF]\n\n")
+                        # Combine all pages from PDF
+                        for doc in pdf_docs:
+                            page_num = doc.metadata.get('page', '')
+                            if page_num:
+                                content_parts.append(f"#### Page {page_num}\n\n")
+                            content_parts.append(doc.page_content)
+                            content_parts.append("\n\n")
+                    else:
+                        print(f"   ⚠️  No content extracted from PDF: {text_file}")
+                        continue
+                else:
+                    # Regular text file processing
+                    with open(text_file, "r", encoding="utf-8", errors="ignore") as f:
+                        file_content = f.read()
+                    
+                    content_parts.append(f"### File: {relative_path}\n\n")
+                    content_parts.append(file_content)
+                    content_parts.append("\n\n")
 
             except Exception as e:
-                print(f"⚠️  Warning: Could not read {md_file}: {e}")
+                print(f"⚠️  Warning: Could not read {text_file}: {e}")
                 continue
 
         return "".join(content_parts)
@@ -1045,7 +1292,7 @@ class GitHubToQdrantProcessor:
                 "source": "github_repository",
                 "repository": repo_name,
                 "branch": branch,
-                "document_type": "combined_markdown",
+                "document_type": "combined_text",
                 "processed_at": datetime.now().isoformat(),
             },
         )
@@ -1136,10 +1383,18 @@ class GitHubToQdrantProcessor:
                         chunk.page_content, chunk_index, repo_name
                     )
 
-                    # Standard LangChain/Qdrant payload structure with MCP compatibility
+                    # Payload structure with multiple compatibility modes
+                    # n8n expects content at root level, LangChain uses page_content, MCP uses document
                     payload = {
-                        "page_content": chunk.page_content,  # Standard field name for full text content
-                        "document": chunk.page_content,  # MCP server compatibility field (root level)
+                        # Root level content for n8n compatibility
+                        "content": chunk.page_content,  # Primary content field for n8n
+                        "text": chunk.page_content,     # Alternative field name some systems use
+                        
+                        # Standard fields for other systems
+                        "page_content": chunk.page_content,  # LangChain standard field
+                        "document": chunk.page_content,      # MCP server compatibility
+                        
+                        # Metadata as separate field
                         "metadata": {
                             **chunk.metadata,  # Original metadata (source, repository, branch, etc.)
                             "chunk_id": chunk_index,
@@ -1151,7 +1406,14 @@ class GitHubToQdrantProcessor:
                             "content_hash": hashlib.md5(
                                 chunk.page_content.encode()
                             ).hexdigest()[:8],  # Short hash for reference
-                        }
+                        },
+                        
+                        # Also include key metadata at root level for easier access
+                        "repository": chunk.metadata.get("repository"),
+                        "branch": chunk.metadata.get("branch"),
+                        "source": chunk.metadata.get("source"),
+                        "chunk_id": chunk_index,
+                        "timestamp": datetime.now().isoformat()
                     }
 
                     # Handle named vectors vs default vectors
@@ -1241,16 +1503,18 @@ class GitHubToQdrantProcessor:
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, temp_dir)
 
-                # Find markdown files
-                markdown_files = self._find_markdown_files(clone_path)
+                # Find text files based on configured mode
+                text_files = self._find_text_files(clone_path)
 
-                if not markdown_files:
-                    print("⚠️  No markdown files found in repository")
+                if not text_files:
+                    file_mode = self.config["processing"].get("file_mode", "markdown_only")
+                    file_type = "text" if file_mode == "all_text" else "markdown"
+                    print(f"⚠️  No {file_type} files found in repository")
                     return
 
-                # Combine markdown files into folder-based files + overall combined file
-                combined_content = self._combine_markdown_files(
-                    markdown_files, repo_name
+                # Combine text files into folder-based files + overall combined file
+                combined_content = self._combine_text_files(
+                    text_files, repo_name
                 )
 
                 # Setup Qdrant collection
@@ -1273,7 +1537,9 @@ class GitHubToQdrantProcessor:
                 branch = self.config["github"].get("branch")
                 if branch:
                     print(f"   Branch: {branch}")
-                print(f"   Markdown files: {len(markdown_files)}")
+                file_mode = self.config["processing"].get("file_mode", "markdown_only")
+                file_type = "text" if file_mode == "all_text" else "markdown"
+                print(f"   {file_type.capitalize()} files: {len(text_files)}")
                 print(
                     f"   Total processing time: {duration.total_seconds():.1f} seconds"
                 )
@@ -1292,11 +1558,16 @@ class GitHubToQdrantProcessor:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Process GitHub repository markdown files into Qdrant vector database"
+        description="Process GitHub repository text files into Qdrant vector database"
     )
-    parser.add_argument("config", help="Path to JSON configuration file")
     parser.add_argument(
-        "--repo-url", help="GitHub repository URL (overrides config file)", default=None
+        "config", 
+        help="Path to configuration file (YAML format recommended, JSON supported)"
+    )
+    parser.add_argument(
+        "--repo-url", 
+        help="GitHub repository URL (overrides config file)", 
+        default=None
     )
 
     args = parser.parse_args()
