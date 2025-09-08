@@ -1,0 +1,168 @@
+# GitHub to Qdrant Sync Configuration Template
+# Copy this file to config.yaml and update with your settings
+# Sensitive data should be stored in environment variables (see .env.example)
+
+# ============================================================
+# GitHub Repository Configuration
+# ============================================================
+github:
+  repository_url: https://github.com/your-org/your-repo.git
+  branch: main
+  clone_depth: 1
+  cleanup_after_processing: true
+  token: ${GITHUB_TOKEN}  # Optional: for private repos
+
+# ============================================================
+# Embedding Provider Selection
+# ============================================================
+# Choose one: azure_openai, mistral_ai, sentence_transformers
+embedding_provider: mistral_ai
+
+# ============================================================
+# Azure OpenAI Configuration
+# ============================================================
+azure_openai:
+  api_key: ${AZURE_OPENAI_API_KEY}
+  endpoint: ${AZURE_OPENAI_ENDPOINT}
+  deployment_name: text-embedding-3-large  # or text-embedding-ada-002
+  api_version: "2024-02-01"
+
+# ============================================================
+# Mistral AI Configuration
+# ============================================================
+mistral_ai:
+  api_key: ${MISTRAL_API_KEY}
+  model: codestral-embed  # or mistral-embed
+  output_dimension: 1536  # 1536 for codestral, 1024 for mistral-embed
+  api_base: https://api.mistral.ai/v1
+
+# ============================================================
+# Sentence Transformers (Local) Configuration
+# ============================================================
+sentence_transformers:
+  # Model options:
+  # - sentence-transformers/all-MiniLM-L6-v2 (384 dimensions)
+  # - intfloat/multilingual-e5-large (1024 dimensions)
+  model: intfloat/multilingual-e5-large
+  vector_size: 1024
+
+# ============================================================
+# Qdrant Vector Database Configuration
+# ============================================================
+qdrant:
+  url: ${QDRANT_URL}  # https://your-cluster.cloud.qdrant.io or http://localhost:6333
+  api_key: ${QDRANT_API_KEY}
+  collection_name: your-collection-name
+  vector_size: 1536  # Must match embedding dimensions
+  distance: Cosine  # Options: Cosine, Euclidean, Dot
+  vector_name: null  # null for unnamed vectors, "model-name" for named vectors
+  recreate_collection: false  # WARNING: true will delete existing collection!
+  
+  # Connection method (auto-detected if not specified)
+  # Options: auto, reverse_proxy, direct, url
+  connection_method: auto
+  timeout: 30
+
+# ============================================================
+# Document Processing Configuration
+# ============================================================
+processing:
+  # File processing mode
+  file_mode: all_text  # Options: all_text, markdown_only
+  
+  # Text chunking configuration
+  chunk_size: 1000  # Characters per chunk (500-2000 recommended)
+  chunk_overlap: 200  # Overlap for context continuity
+  
+  # Markdown-specific extensions
+  markdown_extensions:
+    - .md
+    - .markdown
+    - .mdown
+    - .mkd
+    - .mdx
+  
+  # All text file extensions (for all_text mode)
+  text_extensions:
+    # Documentation formats
+    - .md
+    - .markdown
+    - .txt
+    - .rst
+    
+    # Programming languages
+    - .py
+    - .js
+    - .ts
+    - .jsx
+    - .tsx
+    - .java
+    - .go
+    - .rs
+    - .php
+    - .rb
+    - .c
+    - .cpp
+    - .cs
+    
+    # Web technologies
+    - .html
+    - .css
+    - .scss
+    - .vue
+    - .svelte
+    
+    # Configuration files
+    - .json
+    - .yaml
+    - .yml
+    - .toml
+    - .ini
+    - .env
+    
+    # Shell scripts
+    - .sh
+    - .bash
+    
+    # Build files
+    - .dockerfile
+    - .gitignore
+    
+    # Add more extensions as needed...
+  
+  # Exclude these patterns from processing
+  exclude_patterns:
+    - node_modules
+    - .git
+    - __pycache__
+    - "*.pyc"
+    - .DS_Store
+    - dist
+    - build
+    - "*.min.js"
+    - "*.min.css"
+    - vendor
+  
+  # Deduplication settings
+  deduplication_enabled: true
+  similarity_threshold: 0.95  # 0.9-0.98 recommended
+  
+  # Embedding generation settings
+  embedding_batch_size: 50  # Optimized for Azure OpenAI
+  max_retries: 3
+  batch_delay_seconds: 1  # Prevent rate limiting
+
+# ============================================================
+# Output Configuration
+# ============================================================
+output:
+  base_directory: markdown
+  combined_filename: __combined_markdown.md
+  preserve_structure: true
+
+# ============================================================
+# Logging Configuration
+# ============================================================
+logging:
+  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
