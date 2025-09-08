@@ -3,9 +3,14 @@
 # API Keys and Sensitive Configuration Files
 # NEVER commit files containing real API keys!
 config.json
+config.yaml
 config_*.json
+config_*.yaml
 !config.json.example
+!config.yaml.example
+CLAUDE.md
 *.secret.json
+*.secret.yaml
 .env
 .env.local
 .env.production

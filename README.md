@@ -1,6 +1,6 @@
 # 🚀 GitHub to Qdrant Vector Processing Pipeline
 
-**High-performance document processing pipeline that transforms GitHub repositories containing markdown files into searchable vector databases for AI applications. Features multiple embedding providers including cloud-based and local models. Can be extended to process other text-based files like HTML, TXT, and more.**
+**High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and text files into searchable vector databases for AI applications. Features multiple embedding providers including cloud-based and local models, with state-of-the-art PDF processing capabilities.**
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
@@ -8,24 +8,25 @@
 
 ## 🌟 Overview
 
-This project automatically processes GitHub repositories containing markdown documentation and creates optimized vector embeddings for **Retrieval-Augmented Generation (RAG)**, semantic search, and AI chat applications. While primarily designed for markdown files, it can be adapted to process other text-based formats like HTML, TXT, and similar files. It supports multiple embedding providers including cloud-based APIs and local models, featuring cutting-edge deduplication algorithms.
+This project automatically processes GitHub repositories containing documentation (markdown, PDFs, code, and text files) and creates optimized vector embeddings for **Retrieval-Augmented Generation (RAG)**, semantic search, and AI chat applications. It supports multiple embedding providers including cloud-based APIs and local models, featuring cutting-edge deduplication algorithms and intelligent PDF extraction.
 
 ### ✨ Key Features
 
 - 🔄 **Multi-Provider Support**: Azure OpenAI, Mistral AI & Sentence Transformers
+- 📑 **PDF Processing**: PyMuPDF (60x faster), PyPDFLoader, and Mistral OCR API
 - ⚡ **5-15x Faster Processing**: Vectorized duplicate detection
 - 🎯 **Smart Deduplication**: Content hash + semantic similarity
 - 📊 **Real-time Progress**: Detailed processing reports
 - 🛡️ **Production Ready**: Error handling, rate limiting, retry logic
-- 🎛️ **Highly Configurable**: Multiple repos, branches, models
+- 🎛️ **Highly Configurable**: Multiple repos, branches, models, PDF modes
 
 ### 🎯 Perfect For
 
 - **AI Chatbots** - Create knowledge bases from documentation
 - **Semantic Search** - Enable intelligent document discovery  
 - **RAG Applications** - Augment LLMs with domain-specific knowledge
-- **Technical Documentation** - Process markdown documentation with specialized embeddings
-- **Content Processing** - Adaptable to HTML, TXT, and other text-based files
+- **Technical Documentation** - Process markdown, PDFs, and code with specialized embeddings
+- **Content Processing** - Handles 150+ file types including PDFs, HTML, TXT, code files
 
 ## 🏃‍♂️ Quick Start
 
@@ -48,14 +49,18 @@ Set up your API keys for your chosen embedding provider (see Configuration Guide
 Copy the example config and add your API keys:
 
 ```bash
-cp config.json.example config.json
-# Edit config.json with your API keys
+cp config.yaml.example config.yaml
+# Edit config.yaml with your settings
+
+# Set API keys in .env file for security
+cp .env.example .env
+# Edit .env with your API keys
 ```
 
 ### 4. Run
 
 ```bash
-python github_to_qdrant.py config.json
+python github_to_qdrant.py config.yaml
 ```
 
 ## 🛠️ Installation & Dependencies
@@ -95,9 +100,9 @@ pip install -r requirements.txt
 
 ### 🔧 Basic Configuration
 
-The project uses JSON configuration files. Start with `config.json.example`:
+The project uses YAML configuration files with environment variable support. Start with `config.yaml.example`:
 
-```json
+```yaml
 {
   "embedding_provider": "azure_openai",  // or "mistral_ai"
   "github": {
@@ -189,10 +194,10 @@ The project uses JSON configuration files. Start with `config.json.example`:
 ### Basic Usage
 ```bash
 # Process with default config
-python github_to_qdrant.py config.json
+python github_to_qdrant.py config.yaml
 
 # Process different repository
-python github_to_qdrant.py config.json --repo-url https://github.com/other/repo.git
+python github_to_qdrant.py config.yaml --repo-url https://github.com/other/repo.git
 ```
 
 ### Multiple Configurations
@@ -205,6 +210,37 @@ python github_to_qdrant.py config_multilang.json
 
 # Large documentation projects
 python github_to_qdrant.py config_enterprise.json
+```
+
+### 📑 PDF Processing
+
+The pipeline includes state-of-the-art PDF processing with three modes:
+
+**1. Local Mode (Offline, Fast)**
+```yaml
+pdf_processing:
+  enabled: true
+  mode: local  # Uses PyMuPDF (60x faster) with PyPDFLoader fallback
+```
+
+**2. Cloud Mode (Mistral OCR API)**
+```yaml
+pdf_processing:
+  enabled: true
+  mode: cloud  # Best quality, handles scanned PDFs, $0.001/page
+  cloud:
+    max_pages_per_doc: 100  # Cost control
+```
+
+**3. Hybrid Mode (Smart Selection)**
+```yaml
+pdf_processing:
+  enabled: true
+  mode: hybrid  # Local first, cloud for complex/scanned PDFs
+  hybrid:
+    force_cloud_patterns:  # Always use OCR for these
+      - "*scan*.pdf"
+      - "*ocr*.pdf"
 ```
 
 ### Advanced Examples
@@ -368,8 +404,10 @@ This project uses the **standard LangChain/Qdrant payload structure** for maximu
 ```
 github-qdrant-sync/
 ├── github_to_qdrant.py      # 🌟 Main processing script
-├── config.json.example      # 📝 Configuration template
-├── config_*.json            # 🔧 Custom configs (gitignored)
+├── config.yaml.example      # 📝 Configuration template with docs
+├── config.yaml              # 🔧 Your configuration (gitignored)
+├── .env.example             # 🔐 Environment variables template
+├── .env                     # 🔑 Your API keys (gitignored)
 ├── requirements.txt         # 📦 Python dependencies
 ├── .gitignore              # 🚫 Git exclusions
 ├── README.md               # 📖 This documentation
@@ -384,8 +422,17 @@ github-qdrant-sync/
 
 ### 📄 Configuration Files
 
-- **`config.json.example`** - Template with documentation
-- **`config.json`** - Your custom configuration (gitignored)
+- **`config.yaml.example`** - Template with inline documentation and examples
+- **`config.yaml`** - Your custom configuration (gitignored)
+- **`.env.example`** - Template for environment variables
+- **`.env`** - Your API keys and sensitive data (gitignored)
+
+#### Why YAML?
+
+✅ **Cleaner syntax** - More readable than JSON  
+✅ **Comments support** - Inline documentation  
+✅ **Environment variables** - Secure API key management  
+✅ **Multi-line strings** - Better for long text values
 
 ## 🔧 Troubleshooting
 
@@ -431,7 +478,7 @@ Enable detailed logging:
 ### 📞 Getting Help
 
 1. **Check the logs** - Enable DEBUG logging
-2. **Verify configuration** - Use `config.json.example` 
+2. **Verify configuration** - Use `config.yaml.example` 
 3. **Test connections** - Run with minimal config
 4. **Check dependencies** - Reinstall requirements
 5. **API quotas** - Verify account limits
@@ -450,7 +497,7 @@ export MISTRAL_API_KEY="your-key"
 export QDRANT_API_KEY="your-key"
 
 # Use separate config files (gitignored)
-cp config.json.example config.local.json
+cp config.yaml.example config.local.json
 # Edit config.local.json with real keys
 python github_to_qdrant.py config.local.json
 ```
@@ -477,7 +524,7 @@ python github_to_qdrant.py config.local.json
 }
 
 # 2. Process repository
-python github_to_qdrant.py config.json
+python github_to_qdrant.py config.yaml
 ```
 
 ### Workflow 2: Multi-Language Documentation  
@@ -493,7 +540,7 @@ python github_to_qdrant.py config_french.json   # French docs
 #!/bin/bash
 # Update vector database when docs change
 git pull origin main
-python github_to_qdrant.py config.json
+python github_to_qdrant.py config.yaml
 echo "Vector database updated successfully"
 ```
 
