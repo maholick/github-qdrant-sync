@@ -8,6 +8,9 @@ config_*.json
 config_*.yaml
 !config.json.example
 !config.yaml.example
+repositories.yaml
+repositories_*.yaml
+!repositories.yaml.example
 CLAUDE.md
 *.secret.json
 *.secret.yaml

@@ -1,0 +1,50 @@
+# Example Repository List for Multi-Repository Processing
+# Copy this file to repositories.yaml and update with your repositories
+#
+# Usage:
+#   python github_to_qdrant.py config.yaml --repo-list repositories.yaml
+#
+# Each repository entry requires:
+#   - url: GitHub repository URL (HTTPS or SSH)
+#   - collection_name: Target Qdrant collection name
+#   - branch: (optional) Specific branch to process
+
+repositories:
+  # Example 1: Basic repository with default branch
+  - url: https://github.com/maholick/example-1.git
+    collection_name: maholick-example-1
+
+  # Example 2: Repository with specific branch
+  - url: https://github.com/maholick/example-2.git
+    branch: main
+    collection_name: maholick-example-2
+
+  # Example 3: Private repository using SSH
+  - url: git@github.com:maholick/example-3.git
+    branch: develop
+    collection_name: maholick-example-3
+
+  # Example 4: Documentation repository
+  - url: https://github.com/maholick/example-4.git
+    branch: main
+    collection_name: maholick-example-4
+
+  # Example 5: Multiple versions of the same project
+  - url: https://github.com/maholick/example-5.git
+    branch: main
+    collection_name: maholick-example-5-latest
+
+  - url: https://github.com/maholick/example-5.git
+    branch: v1.0
+    collection_name: maholick-example-5-v1
+
+  # Example 6: Internal documentation
+  - url: https://github.com/maholick/example-6.git
+    collection_name: maholick-example-6
+
+# Notes:
+# - All repositories will be processed sequentially
+# - If one fails, processing continues with the next
+# - Global settings from config.yaml apply to all repositories
+# - Branch defaults to repository's default branch if not specified
+# - Collection names must be valid Qdrant identifiers (alphanumeric, hyphens, underscores)
