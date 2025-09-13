@@ -1,6 +1,6 @@
 # 🚀 GitHub to Qdrant Vector Processing Pipeline
 
-**High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and text files into searchable vector databases for AI applications. Features multiple embedding providers including cloud-based and local models, with state-of-the-art PDF processing capabilities.**
+**High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and 150+ text file types into searchable vector databases for AI applications. Now with multi-repository batch processing, multiple embedding providers, and state-of-the-art deduplication algorithms.**
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
@@ -12,13 +12,15 @@ This project automatically processes GitHub repositories containing documentatio
 
 ### ✨ Key Features
 
-- 🔄 **Multi-Provider Support**: Azure OpenAI, Mistral AI & Sentence Transformers
+- 🔄 **Multi-Repository Processing**: Process multiple repos sequentially with one command
+- 🤖 **Multi-Provider Support**: Azure OpenAI, Mistral AI & Sentence Transformers
 - 📑 **PDF Processing**: PyMuPDF (60x faster), PyPDFLoader, and Mistral OCR API
-- ⚡ **5-15x Faster Processing**: Vectorized duplicate detection
-- 🎯 **Smart Deduplication**: Content hash + semantic similarity
-- 📊 **Real-time Progress**: Detailed processing reports
+- ⚡ **5-15x Faster Processing**: Vectorized duplicate detection algorithms
+- 🎯 **Smart Deduplication**: Two-stage content hash + semantic similarity
+- 📊 **Real-time Progress**: Detailed processing reports with summary statistics
 - 🛡️ **Production Ready**: Error handling, rate limiting, retry logic
-- 🎛️ **Highly Configurable**: Multiple repos, branches, models, PDF modes
+- 🎛️ **Highly Configurable**: YAML configs with environment variable support
+- 📚 **150+ File Types**: Process code, docs, configs, PDFs, and more
 
 ### 🎯 Perfect For
 
@@ -103,68 +105,61 @@ pip install -r requirements.txt
 The project uses YAML configuration files with environment variable support. Start with `config.yaml.example`:
 
 ```yaml
-{
-  "embedding_provider": "azure_openai",  // or "mistral_ai"
-  "github": {
-    "repository_url": "https://github.com/your-org/your-repo.git",
-    "branch": "main",
-    "token": null  // For private repos
-  },
-  "qdrant": {
-    "url": "https://your-cluster.qdrant.io:6333",
-    "api_key": "your-qdrant-key",
-    "collection_name": "your-collection",
-    "vector_size": 3072  // Must match embedding model
-  }
-}
+# Embedding provider selection
+embedding_provider: azure_openai  # or mistral_ai, sentence_transformers
+
+github:
+  repository_url: https://github.com/your-org/your-repo.git
+  branch: main
+  token: ${GITHUB_TOKEN}  # For private repos (from .env file)
+
+qdrant:
+  url: ${QDRANT_URL}  # e.g., https://your-cluster.qdrant.io
+  api_key: ${QDRANT_API_KEY}
+  collection_name: your-collection
+  vector_size: 3072  # Must match embedding model
 ```
 
 ### 🤖 Embedding Providers
 
 #### Azure OpenAI
-```json
-{
-  "embedding_provider": "azure_openai",
-  "azure_openai": {
-    "api_key": "your-azure-key",
-    "endpoint": "https://your-resource.openai.azure.com/",
-    "deployment_name": "text-embedding-3-large",
-    "api_version": "2024-02-01"
-  },
-  "qdrant": {
-    "vector_size": 3072  // for text-embedding-3-large
-  }
-}
+```yaml
+embedding_provider: azure_openai
+
+azure_openai:
+  api_key: ${AZURE_OPENAI_API_KEY}
+  endpoint: ${AZURE_OPENAI_ENDPOINT}
+  deployment_name: text-embedding-3-large
+  api_version: "2024-02-01"
+
+qdrant:
+  vector_size: 3072  # for text-embedding-3-large
 ```
 
 #### Mistral AI
-```json
-{
-  "embedding_provider": "mistral_ai",
-  "mistral_ai": {
-    "api_key": "your-mistral-key",
-    "model": "codestral-embed",
-    "output_dimension": 3072
-  },
-  "qdrant": {
-    "vector_size": 3072
-  }
-}
+```yaml
+embedding_provider: mistral_ai
+
+mistral_ai:
+  api_key: ${MISTRAL_API_KEY}
+  model: codestral-embed  # or mistral-embed
+  output_dimension: 3072
+
+qdrant:
+  vector_size: 3072
 ```
 
 #### Sentence Transformers (Local)
-```json
-{
-  "embedding_provider": "sentence_transformers",
-  "sentence_transformers": {
-    "model": "intfloat/multilingual-e5-large",
-    "vector_size": 1024
-  },
-  "qdrant": {
-    "vector_size": 1024,
-    "vector_name": "intfloat/multilingual-e5-large"  // Optional: for MCP compatibility
-  }
-}
+```yaml
+embedding_provider: sentence_transformers
+
+sentence_transformers:
+  model: intfloat/multilingual-e5-large
+  vector_size: 1024
+
+qdrant:
+  vector_size: 1024
+  vector_name: intfloat/multilingual-e5-large  # Optional: for MCP compatibility
 ```
 
 **Sentence Transformers Benefits:**
@@ -176,17 +171,15 @@ The project uses YAML configuration files with environment variable support. Sta
 
 ### 🎛️ Performance Tuning
 
-```json
-{
-  "processing": {
-    "chunk_size": 1000,              // Characters per chunk
-    "chunk_overlap": 200,            // Overlap for context
-    "embedding_batch_size": 50,      // Optimized batch size
-    "batch_delay_seconds": 1,        // Required for Azure OpenAI
-    "deduplication_enabled": true,   // Enable smart deduplication
-    "similarity_threshold": 0.95     // Duplicate detection threshold
-  }
-}
+```yaml
+processing:
+  chunk_size: 1000              # Characters per chunk
+  chunk_overlap: 200            # Overlap for context
+  embedding_batch_size: 50      # Optimized batch size
+  batch_delay_seconds: 1        # Required for Azure OpenAI
+  deduplication_enabled: true   # Enable smart deduplication
+  similarity_threshold: 0.95    # Duplicate detection threshold
+  file_mode: all_text          # Process all text files (or markdown_only)
 ```
 
 ## 🚀 Usage Examples
@@ -200,16 +193,101 @@ python github_to_qdrant.py config.yaml
 python github_to_qdrant.py config.yaml --repo-url https://github.com/other/repo.git
 ```
 
+### 🔄 Multi-Repository Processing (New!)
+
+Process multiple repositories sequentially with a single command:
+
+```bash
+# Process multiple repositories from a list file
+python github_to_qdrant.py config.yaml --repo-list repositories.yaml
+```
+
+**Repository List File Format (`repositories.yaml`):**
+```yaml
+repositories:
+  # Basic repository
+  - url: https://github.com/langchain-ai/langchain.git
+    collection_name: langchain-docs
+
+  # Repository with specific branch
+  - url: https://github.com/openai/openai-python.git
+    branch: main
+    collection_name: openai-python-docs
+
+  # Private repository using SSH
+  - url: git@github.com:myorg/private-repo.git
+    branch: develop
+    collection_name: private-docs
+
+  # Multiple versions of the same project
+  - url: https://github.com/facebook/react.git
+    branch: main
+    collection_name: react-latest
+
+  - url: https://github.com/facebook/react.git
+    branch: 18.x
+    collection_name: react-v18
+```
+
+**Features:**
+- ✅ Sequential processing with progress tracking
+- ✅ Individual collection names per repository
+- ✅ Continues processing if one repository fails
+- ✅ Comprehensive summary report at the end
+- ✅ All global settings from `config.yaml` apply
+
+**Example Output:**
+```
+============================================================
+Processing repository 2/5
+Repository: https://github.com/openai/openai-python.git
+Branch: main
+Collection: openai-python-docs
+============================================================
+[... processing output ...]
+
+============================================================
+MULTI-REPOSITORY PROCESSING SUMMARY
+============================================================
+Total repositories: 5
+✅ Successful: 4
+❌ Failed: 1
+
+Details:
+------------------------------------------------------------
+✅ langchain → langchain-docs
+   Files: 234, Chunks: 1,234
+   Time: 45.2s
+✅ openai-python → openai-python-docs
+   Files: 89, Chunks: 567
+   Time: 23.1s
+❌ private-repo → Failed
+   Error: Authentication error
+✅ react → react-latest
+   Files: 456, Chunks: 2,345
+   Time: 89.3s
+✅ react → react-v18
+   Files: 423, Chunks: 2,123
+   Time: 82.7s
+------------------------------------------------------------
+
+Totals:
+   Files processed: 1,202
+   Chunks created: 6,269
+   Processing time: 240.3s (4m 0s)
+============================================================
+```
+
 ### Multiple Configurations
 ```bash
 # Different repository configurations
-python github_to_qdrant.py config_technical.json
+python github_to_qdrant.py config_technical.yaml
 
 # Multi-language documentation
-python github_to_qdrant.py config_multilang.json
+python github_to_qdrant.py config_multilang.yaml
 
 # Large documentation projects
-python github_to_qdrant.py config_enterprise.json
+python github_to_qdrant.py config_enterprise.yaml
 ```
 
 ### 📑 PDF Processing
@@ -246,36 +324,29 @@ pdf_processing:
 ### Advanced Examples
 
 **Process specific branch:**
-```json
-{
-  "github": {
-    "repository_url": "https://github.com/your-org/your-repo.git",
-    "branch": "develop"
-  }
-}
+```yaml
+github:
+  repository_url: https://github.com/your-org/your-repo.git
+  branch: develop
 ```
 
 **Switch to Mistral AI:**
-```json
-{
-  "embedding_provider": "mistral_ai",
-  "mistral_ai": {
-    "api_key": "your-mistral-key",
-    "model": "codestral-embed",
-    "output_dimension": 3072
-  }
-}
+```yaml
+embedding_provider: mistral_ai
+
+mistral_ai:
+  api_key: ${MISTRAL_API_KEY}
+  model: codestral-embed
+  output_dimension: 3072
 ```
 
 **Use Local Models:**
-```json
-{
-  "embedding_provider": "sentence_transformers",
-  "sentence_transformers": {
-    "model": "intfloat/multilingual-e5-large",
-    "vector_size": 1024
-  }
-}
+```yaml
+embedding_provider: sentence_transformers
+
+sentence_transformers:
+  model: intfloat/multilingual-e5-large
+  vector_size: 1024
 ```
 
 ## 📊 Embedding Models Comparison
@@ -366,30 +437,40 @@ This project uses the **standard LangChain/Qdrant payload structure** for maximu
 {
   "page_content": "Full document text content here...",
   "document": "Full document text content here...",
+  "content": "Full document text content here...",
+  "text": "Full document text content here...",
   "metadata": {
     "source": "github_repository",
     "repository": "your-repo-name",
     "branch": "main",
-    "document_type": "markdown",
+    "document_type": "combined_text",
     "chunk_id": 123,
     "chunk_size": 850,
     "preview": "First 200 characters of content...",
     "content_hash": "abc123de",
     "batch_number": 42,
-    "processed_at": "2025-08-18T12:00:00"
-  }
+    "processed_at": "2025-01-13T12:00:00"
+  },
+  "repository": "your-repo-name",
+  "branch": "main",
+  "source": "github_repository",
+  "chunk_id": 123,
+  "timestamp": "2025-01-13T12:00:00"
 }
 ```
 
 ### 📋 Field Descriptions
 
 - **`page_content`** - Full text content of the document chunk (standard LangChain field)
-- **`document`** - Full document text (MCP server compatibility field at root level)
+- **`document`** - Full document text (MCP server compatibility)
+- **`content`** - Full document text (n8n compatibility)
+- **`text`** - Alternative field name some systems use
 - **`metadata.preview`** - 200-character preview for quick inspection and UI display
 - **`metadata.chunk_id`** - Unique identifier for tracking and deduplication
 - **`metadata.source`** - Document source type (e.g., "github_repository")
 - **`metadata.repository`** - Repository name for filtering and organization
 - **`metadata.content_hash`** - MD5 hash for duplicate detection and verification
+- **Root level fields** - Key metadata duplicated at root for easier access (repository, branch, source, chunk_id, timestamp)
 
 ### ✅ Benefits
 
@@ -404,13 +485,17 @@ This project uses the **standard LangChain/Qdrant payload structure** for maximu
 ```
 github-qdrant-sync/
 ├── github_to_qdrant.py      # 🌟 Main processing script
+├── pdf_processor.py         # 📑 Advanced PDF processing module
 ├── config.yaml.example      # 📝 Configuration template with docs
 ├── config.yaml              # 🔧 Your configuration (gitignored)
+├── repositories.yaml.example # 📋 Multi-repo list template
+├── repositories.yaml        # 📋 Your repository list (gitignored)
 ├── .env.example             # 🔐 Environment variables template
 ├── .env                     # 🔑 Your API keys (gitignored)
 ├── requirements.txt         # 📦 Python dependencies
 ├── .gitignore              # 🚫 Git exclusions
 ├── README.md               # 📖 This documentation
+├── CLAUDE.md               # 🤖 AI assistant context (gitignored)
 ├── venv/                   # 🐍 Virtual environment (gitignored)
 └── markdown/               # 📄 Generated markdown output (gitignored)
     ├── repo-name/
@@ -424,15 +509,18 @@ github-qdrant-sync/
 
 - **`config.yaml.example`** - Template with inline documentation and examples
 - **`config.yaml`** - Your custom configuration (gitignored)
+- **`repositories.yaml.example`** - Template for multi-repository processing
+- **`repositories.yaml`** - Your repository list (gitignored)
 - **`.env.example`** - Template for environment variables
 - **`.env`** - Your API keys and sensitive data (gitignored)
 
 #### Why YAML?
 
-✅ **Cleaner syntax** - More readable than JSON  
-✅ **Comments support** - Inline documentation  
-✅ **Environment variables** - Secure API key management  
+✅ **Cleaner syntax** - More readable than JSON
+✅ **Comments support** - Inline documentation
+✅ **Environment variables** - Secure API key management via `${VAR_NAME}` syntax
 ✅ **Multi-line strings** - Better for long text values
+✅ **Default values** - Support for `${VAR:-default}` pattern
 
 ## 🔧 Troubleshooting
 
@@ -467,12 +555,10 @@ pip install -r requirements.txt
 ### 🐛 Debug Mode
 
 Enable detailed logging:
-```json
-{
-  "logging": {
-    "level": "DEBUG"
-  }
-}
+```yaml
+logging:
+  level: DEBUG
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 ```
 
 ### 📞 Getting Help
@@ -491,15 +577,21 @@ Enable detailed logging:
 
 ✅ **Safe practices:**
 ```bash
-# Use environment variables
-export AZURE_OPENAI_KEY="your-key"
-export MISTRAL_API_KEY="your-key"
-export QDRANT_API_KEY="your-key"
+# Use .env file (recommended)
+cp .env.example .env
+# Edit .env with your API keys:
+# AZURE_OPENAI_API_KEY=your-key
+# MISTRAL_API_KEY=your-key
+# QDRANT_API_KEY=your-key
+# GITHUB_TOKEN=your-token
 
-# Use separate config files (gitignored)
-cp config.yaml.example config.local.json
-# Edit config.local.json with real keys
-python github_to_qdrant.py config.local.json
+# Then use environment variables in config.yaml:
+# api_key: ${AZURE_OPENAI_API_KEY}
+
+# Or use separate config files (gitignored)
+cp config.yaml.example config.local.yaml
+# Edit config.local.yaml with real keys
+python github_to_qdrant.py config.local.yaml
 ```
 
 ### 🛡️ Production Deployment
@@ -514,25 +606,25 @@ python github_to_qdrant.py config.local.json
 
 ### Workflow 1: Technical Documentation Site
 ```bash
-# 1. Configure for technical content
-{
-  "embedding_provider": "mistral_ai",
-  "mistral_ai": {
-    "model": "codestral-embed",
-    "output_dimension": 3072
-  }
-}
+# 1. Configure for technical content in config.yaml
+embedding_provider: mistral_ai
+mistral_ai:
+  model: codestral-embed
+  output_dimension: 3072
 
 # 2. Process repository
 python github_to_qdrant.py config.yaml
 ```
 
-### Workflow 2: Multi-Language Documentation  
+### Workflow 2: Multi-Language Documentation
 ```bash
 # Process different language versions
-python github_to_qdrant.py config_english.json  # English docs
-python github_to_qdrant.py config_german.json   # German docs
-python github_to_qdrant.py config_french.json   # French docs
+python github_to_qdrant.py config_english.yaml  # English docs
+python github_to_qdrant.py config_german.yaml   # German docs
+python github_to_qdrant.py config_french.yaml   # French docs
+
+# Or use multi-repo processing with single config
+python github_to_qdrant.py config.yaml --repo-list multilang_repos.yaml
 ```
 
 ### Workflow 3: Continuous Integration
