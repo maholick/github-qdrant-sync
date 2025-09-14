@@ -20,11 +20,13 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
         
-    - name: Install linting tools only
+    - name: Install linting tools and minimal dependencies
       run: |
         python -m pip install --upgrade pip
-        # Only install linting tools - no need for heavy dependencies
+        # Install linting tools
         pip install pylint ruff
+        # Install minimal dependencies for pylint to parse the code
+        pip install pyyaml python-dotenv
         
     - name: Check formatting with Ruff
       run: |
