@@ -1,0 +1,19 @@
+# UI Requirements for GitHub to Qdrant Processor
+# Install with: pip install -r requirements_ui.txt
+
+# Core UI framework
+gradio>=4.0.0
+
+# Configuration handling (should already be installed from main requirements)
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# For better async handling in UI
+aiofiles>=23.0.0
+
+# Optional: For better performance
+uvicorn>=0.27.0
+fastapi>=0.109.0
+
+# Note: All other dependencies (langchain, qdrant-client, etc.)
+# should be installed from the main requirements.txt file
