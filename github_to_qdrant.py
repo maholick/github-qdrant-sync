@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 import numpy as np
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import AzureOpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -353,19 +354,31 @@ class GitHubToQdrantProcessor:
         self.qdrant_client = self._initialize_qdrant()
         self._test_connections()
 
-        # Initialize text splitter
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.config["processing"]["chunk_size"],
-            chunk_overlap=self.config["processing"]["chunk_overlap"],
-            # Markdown-aware separators
-            separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
-            length_function=len,
-        )
-        chunk_size = self.config["processing"]["chunk_size"]
-        chunk_overlap = self.config["processing"]["chunk_overlap"]
-        print(
-            f"📝 Text splitter configured: {chunk_size} chars/chunk with {chunk_overlap} overlap"
-        )
+        # Initialize text splitter based on strategy
+        chunking_strategy = self.config["processing"].get("chunking_strategy", "recursive")
+
+        if chunking_strategy == "semantic":
+            # Use semantic chunking with embeddings
+            self.text_splitter = SemanticChunker(
+                embeddings=self.embeddings,
+                breakpoint_threshold_type="percentile",
+                breakpoint_threshold_amount=95,  # 95th percentile for semantic similarity
+            )
+            print(f"📝 Semantic text splitter configured with percentile threshold")
+        else:
+            # Default to recursive character text splitter
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.config["processing"]["chunk_size"],
+                chunk_overlap=self.config["processing"]["chunk_overlap"],
+                # Markdown-aware separators
+                separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
+                length_function=len,
+            )
+            chunk_size = self.config["processing"]["chunk_size"]
+            chunk_overlap = self.config["processing"]["chunk_overlap"]
+            print(
+                f"📝 Text splitter configured: {chunk_size} chars/chunk with {chunk_overlap} overlap"
+            )
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file with environment variable support."""

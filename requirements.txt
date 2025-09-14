@@ -1,6 +1,7 @@
 langchain>=0.1.0
 langchain-openai>=0.1.0
 langchain-community>=0.1.0
+langchain-experimental>=0.0.47
 qdrant-client>=1.7.0
 openai>=1.0.0
 tiktoken>=0.5.0
@@ -17,6 +18,9 @@ sentence-transformers>=2.0.0
 # For PDF processing
 pymupdf>=1.24.0  # Fast PDF extraction (PyMuPDF/fitz)
 pypdf>=3.17.0    # Alternative PDF extraction
+
+# For image extraction from PDFs (Mistral Vision API used for processing)
+# Pillow>=10.0.0   # Not needed since we use Mistral API
 
 # For code formatting and linting
 ruff>=0.1.0

@@ -13,6 +13,7 @@ import logging
 import os
 from typing import List, Dict, Any, Optional
 from langchain.schema import Document
+from io import BytesIO
 
 # PyMuPDF (fitz) - optional but recommended
 try:
@@ -38,6 +39,9 @@ try:
 except ImportError:
     MISTRAL_AVAILABLE = False
 
+# Note: We use Mistral Vision API for image processing
+# No local dependencies needed for OCR
+
 
 class PDFProcessor:
     """
@@ -58,14 +62,33 @@ class PDFProcessor:
         self.pdf_config = config.get("pdf_processing", {})
         self.mode = self.pdf_config.get("mode", "local")
 
-        # Initialize Mistral client if configured
+        # Initialize Mistral client if configured (for OCR and image processing)
         self.mistral_client = None
-        if self.pdf_config.get("cloud", {}).get("enabled") and MISTRAL_AVAILABLE:
-            mistral_config = config.get("mistral_ai", {})
+        mistral_config = config.get("mistral_ai", {})
+
+        # Check if Mistral should be initialized for any of these features:
+        # 1. Cloud PDF OCR
+        # 2. Image extraction with Vision API
+        needs_mistral_for_ocr = (
+            self.pdf_config.get("cloud", {}).get("enabled") or
+            self.mode == "cloud" or
+            self.mode == "hybrid"
+        )
+        needs_mistral_for_images = (
+            self.pdf_config.get("extract_images", False) and
+            self.pdf_config.get("image_processing_mode", "none") != "none"
+        )
+
+        if MISTRAL_AVAILABLE and (needs_mistral_for_ocr or needs_mistral_for_images):
             api_key = mistral_config.get("api_key")
             if api_key:
                 self.mistral_client = Mistral(api_key=api_key)
-                self.logger.info("Mistral OCR client initialized")
+                self.logger.info("Mistral client initialized for PDF/image processing")
+            else:
+                self.logger.warning("Mistral API key not found - OCR and image extraction will be disabled")
+                if needs_mistral_for_ocr and self.mode == "cloud":
+                    self.logger.warning("Switching PDF mode from 'cloud' to 'local' due to missing Mistral API")
+                    self.mode = "local"
 
         self._log_available_methods()
 
@@ -176,7 +199,10 @@ class PDFProcessor:
     def _process_cloud(self, file_path: str) -> List[Document]:
         """Process PDF using cloud methods (Mistral OCR)."""
         if not self.mistral_client:
-            self.logger.warning("Mistral OCR not configured, falling back to local")
+            self.logger.warning(
+                "Cloud PDF processing requested but Mistral client not available. "
+                "Please configure Mistral API key. Falling back to local processing."
+            )
             return self._process_local(file_path)
 
         return self._extract_with_mistral(file_path)
@@ -209,7 +235,7 @@ class PDFProcessor:
         return docs if docs else []
 
     def _extract_with_pymupdf(self, file_path: str) -> List[Document]:
-        """Extract text using PyMuPDF."""
+        """Extract text and optionally images using PyMuPDF."""
         if not PYMUPDF_AVAILABLE:
             return []
 
@@ -219,6 +245,8 @@ class PDFProcessor:
 
             local_config = self.pdf_config.get("local", {})
             preserve_layout = local_config.get("preserve_layout", True)
+            extract_images = self.pdf_config.get("extract_images", False)
+            image_mode = self.pdf_config.get("image_processing_mode", "none")
 
             for page_num in range(len(pdf_document)):
                 page = pdf_document[page_num]
@@ -227,6 +255,13 @@ class PDFProcessor:
                     text = page.get_text("text", sort=True)
                 else:
                     text = page.get_text()
+
+                # Extract images if enabled
+                image_text = ""
+                if extract_images and image_mode != "none":
+                    image_text = self._extract_images_from_page(page, page_num, file_path)
+                    if image_text:
+                        text = text + "\n\n[Extracted Image Content]:\n" + image_text
 
                 if text.strip():
                     doc = Document(
@@ -237,6 +272,7 @@ class PDFProcessor:
                             "total_pages": len(pdf_document),
                             "extraction_method": "pymupdf",
                             "file_type": "pdf",
+                            "has_images": bool(image_text),
                         },
                     )
                     docs.append(doc)
@@ -358,3 +394,89 @@ class PDFProcessor:
         quality = min(avg_chars / 500, 1.0)
 
         return quality
+
+    def _extract_images_from_page(self, page, page_num: int, file_path: str) -> str:
+        """Extract images from a PDF page and process with Mistral Vision API."""
+        if not PYMUPDF_AVAILABLE:
+            return ""
+
+        # Check if Mistral client is available and image extraction is enabled
+        if not self.mistral_client:
+            if self.pdf_config.get("extract_images", False):
+                self.logger.debug(
+                    "Image extraction enabled but Mistral client not available. "
+                    "Please configure Mistral API to use image extraction."
+                )
+            return ""
+
+        image_processing_mode = self.pdf_config.get("image_processing_mode", "none")
+        if image_processing_mode == "none":
+            return ""
+
+        extracted_text = []
+
+        try:
+            # Get all images in the page
+            image_list = page.get_images()
+
+            if not image_list:
+                return ""
+
+            self.logger.debug(f"Found {len(image_list)} images on page {page_num + 1}")
+
+            for img_index, img in enumerate(image_list):
+                try:
+                    # Extract image
+                    xref = img[0]
+                    pix = fitz.Pixmap(page.parent, xref)
+
+                    # Convert to RGB if necessary
+                    if pix.n - pix.alpha >= 4:  # CMYK or other
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+
+                    # Convert to base64 for Mistral API
+                    img_data = pix.tobytes("png")
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
+
+                    # Use Mistral to process the image
+                    if image_processing_mode == "ocr":
+                        # Extract text from image
+                        prompt = "Extract all text from this image. If there is no text, describe what the image shows."
+                    else:  # description mode
+                        prompt = "Describe this image in detail, including any text, diagrams, charts, or technical information."
+
+                    try:
+                        # Call Mistral Vision API
+                        response = self.mistral_client.chat.complete(
+                            model="pixtral-12b-2409",  # Mistral's vision model
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt},
+                                        {"type": "image_url", "image_url": f"data:image/png;base64,{img_base64}"}
+                                    ]
+                                }
+                            ],
+                            max_tokens=500
+                        )
+
+                        if response and response.choices:
+                            text = response.choices[0].message.content
+                            if text.strip():
+                                extracted_text.append(f"[Image {img_index + 1}]: {text.strip()}")
+                                self.logger.debug(f"Extracted content from image {img_index + 1} on page {page_num + 1}")
+
+                    except Exception as api_error:
+                        self.logger.debug(f"Mistral API failed for image {img_index + 1}: {api_error}")
+
+                    pix = None  # Free memory
+
+                except Exception as img_error:
+                    self.logger.debug(f"Failed to process image {img_index + 1}: {img_error}")
+                    continue
+
+        except Exception as e:
+            self.logger.debug(f"Image extraction failed for page {page_num + 1}: {e}")
+
+        return "\n".join(extracted_text) if extracted_text else ""
