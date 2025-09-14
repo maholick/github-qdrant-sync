@@ -13,7 +13,6 @@ import logging
 import os
 from typing import List, Dict, Any, Optional
 from langchain.schema import Document
-from io import BytesIO
 
 # PyMuPDF (fitz) - optional but recommended
 try:
