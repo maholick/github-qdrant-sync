@@ -195,6 +195,28 @@ output:
   preserve_structure: true
 
 # ============================================================
+# Payload Configuration
+# ============================================================
+payload:
+  # Content field names - list all fields that should contain the document text
+  # Configure based on your integration needs:
+  # - content: Required for n8n
+  # - page_content: Required for LangChain
+  # - document: For MCP compatibility (optional)
+  # - text: Alternative field name (optional)
+  content_fields:
+    - content      # Primary field for n8n
+    - page_content # Required for LangChain
+    # - document   # Uncomment for MCP compatibility
+    # - text       # Uncomment if needed
+
+  # Preview configuration
+  preview_length: 200  # Characters for preview snippet (150-300 recommended)
+
+  # Optional: Only include specified fields (reduces payload size)
+  minimal_mode: false  # If true, only includes first 2 content fields
+
+# ============================================================
 # Logging Configuration
 # ============================================================
 logging:

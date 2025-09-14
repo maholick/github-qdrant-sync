@@ -40,6 +40,196 @@ from pdf_processor import PDFProcessor
 from dataclasses import dataclass
 
 
+class EmbeddingCache:
+    """Cache for embedding generation to avoid redundant API calls."""
+
+    def __init__(self, max_size=500):
+        """Initialize cache with maximum size."""
+        self.cache = {}  # content_hash -> embedding
+        self.access_order = []  # Track LRU
+        self.max_size = max_size
+        self.hits = 0
+        self.misses = 0
+
+    def get_or_generate(self, text: str, generate_fn):
+        """Get cached embedding or generate new one."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+
+        if text_hash in self.cache:
+            self.hits += 1
+            # Move to end (most recently used)
+            self.access_order.remove(text_hash)
+            self.access_order.append(text_hash)
+            return self.cache[text_hash]
+
+        self.misses += 1
+        embedding = generate_fn(text)
+
+        # Add to cache with LRU eviction
+        if len(self.cache) >= self.max_size:
+            # Remove least recently used
+            lru_hash = self.access_order.pop(0)
+            del self.cache[lru_hash]
+
+        self.cache[text_hash] = embedding
+        self.access_order.append(text_hash)
+        return embedding
+
+    def get_stats(self):
+        """Return cache statistics."""
+        total = self.hits + self.misses
+        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": f"{hit_rate:.1f}%",
+            "size": len(self.cache)
+        }
+
+
+def detect_source_type(file_path: str) -> str:
+    """Detect source type from file extension."""
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == '.pdf':
+        return 'pdf'
+    elif ext in ['.md', '.markdown', '.mdx']:
+        return 'markdown'
+    elif ext in ['.py', '.js', '.ts', '.java', '.go', '.rs', '.cpp', '.c', '.h', '.hpp']:
+        return 'code'
+    elif ext in ['.yaml', '.yml', '.json', '.toml', '.ini', '.cfg', '.conf']:
+        return 'config'
+    elif ext in ['.txt', '.text']:
+        return 'text'
+    elif ext in ['.html', '.htm', '.xml']:
+        return 'markup'
+    elif ext in ['.css', '.scss', '.sass', '.less']:
+        return 'stylesheet'
+    elif ext in ['.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd']:
+        return 'script'
+    elif ext in ['.sql']:
+        return 'database'
+    else:
+        return 'document'
+
+
+def calculate_quality_score(chunk: Document) -> float:
+    """
+    Calculate quality score (0-1) based on content characteristics.
+    Higher scores indicate more valuable content for retrieval.
+    """
+    content = chunk.page_content
+    score_components = []
+
+    # 1. Information density (30% weight)
+    # Ratio of non-whitespace to total characters
+    density = len(content.strip()) / max(len(content), 1)
+    score_components.append(density * 0.3)
+
+    # 2. Optimal length (30% weight)
+    # Best: 500-2000 chars, penalty for too short or too long
+    length = len(content)
+    if length < 100:
+        length_score = length / 500  # Linear penalty for very short
+    elif length <= 2000:
+        length_score = 1.0  # Optimal range
+    else:
+        # Gradual penalty for being too long
+        length_score = max(0.5, 1.0 - (length - 2000) / 5000)
+    score_components.append(length_score * 0.3)
+
+    # 3. Content type bonus (20% weight)
+    content_lower = content.lower()
+    if "```" in content or "def " in content or "function " in content or "class " in content:
+        content_type_score = 1.0  # Code blocks
+    elif "##" in content or "**" in content:
+        content_type_score = 0.9  # Formatted markdown
+    elif "." in content and len(content.split('.')) > 2:
+        content_type_score = 0.8  # Prose with sentences
+    else:
+        content_type_score = 0.6  # Plain text
+    score_components.append(content_type_score * 0.2)
+
+    # 4. Keyword richness (20% weight)
+    # Technical terms and documentation keywords
+    tech_keywords = ['api', 'function', 'class', 'method', 'parameter',
+                     'return', 'example', 'usage', 'config', 'install',
+                     'import', 'export', 'interface', 'implementation']
+    keyword_count = sum(1 for kw in tech_keywords if kw in content_lower)
+    keyword_score = min(1.0, keyword_count / 3)  # Cap at 3 keywords
+    score_components.append(keyword_score * 0.2)
+
+    return round(sum(score_components), 2)
+
+
+def create_payload(chunk: Document, config: Dict[str, Any], chunk_index: int,
+                  repo_name: str, file_path: str) -> Dict[str, Any]:
+    """Create optimized payload with configurable content fields."""
+
+    # Get content field configuration
+    payload_config = config.get("payload", {})
+    content_fields = payload_config.get("content_fields", ["content", "page_content"])
+    preview_length = payload_config.get("preview_length", 200)
+    minimal_mode = payload_config.get("minimal_mode", False)
+
+    # Apply minimal mode if enabled
+    if minimal_mode and len(content_fields) > 2:
+        content_fields = content_fields[:2]
+
+    # Create preview snippet
+    preview = chunk.page_content[:preview_length]
+    if len(chunk.page_content) > preview_length:
+        # Try to cut at word boundary
+        last_space = preview.rfind(' ')
+        if last_space > preview_length * 0.8:  # Only cut at word if not losing too much
+            preview = preview[:last_space] + "..."
+        else:
+            preview = preview + "..."
+
+    # Build payload with configurable content fields
+    payload = {}
+
+    # Add content to all configured fields
+    for field_name in content_fields:
+        payload[field_name] = chunk.page_content
+
+    # Add flattened metadata (no nesting)
+    payload.update({
+        # Identifiers
+        "doc_id": f"{repo_name}_{os.path.basename(file_path)}_{chunk_index}",
+        "chunk_id": chunk_index,
+
+        # Source information
+        "source": chunk.metadata.get("source", file_path),
+        "source_type": detect_source_type(file_path),
+        "repository": chunk.metadata.get("repository", repo_name),
+        "branch": chunk.metadata.get("branch", "main"),
+
+        # Content metrics
+        "preview": preview,
+        "chunk_size": len(chunk.page_content),
+        "token_count": len(chunk.page_content.split()),
+        "quality_score": calculate_quality_score(chunk),
+
+        # Processing metadata
+        "timestamp": int(datetime.now().timestamp()),
+        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
+        "extraction_method": chunk.metadata.get("extraction_method", "default"),
+    })
+
+    # Add PDF-specific metadata if applicable
+    if chunk.metadata.get("page"):
+        payload["page_number"] = chunk.metadata.get("page")
+        payload["total_pages"] = chunk.metadata.get("total_pages")
+
+    # Add any additional metadata that's not already included
+    for key, value in chunk.metadata.items():
+        if key not in payload and key not in ['page_content', 'content', 'text', 'document']:
+            payload[key] = value
+
+    return payload
+
+
 @dataclass
 class RepositoryConfig:
     """Configuration for a single repository to process."""
@@ -327,6 +517,10 @@ class GitHubToQdrantProcessor:
 
         print(f"🎯 Target collection: {self.config['qdrant']['collection_name']}")
 
+        # Initialize embedding cache
+        self.embedding_cache = EmbeddingCache(max_size=500)
+        print("💾 Embedding cache initialized (max size: 500)")
+
         # Display embedding provider info
         provider = self.config.get("embedding_provider", "azure_openai")
         if provider == "mistral_ai":
@@ -364,7 +558,7 @@ class GitHubToQdrantProcessor:
                 breakpoint_threshold_type="percentile",
                 breakpoint_threshold_amount=95,  # 95th percentile for semantic similarity
             )
-            print(f"📝 Semantic text splitter configured with percentile threshold")
+            print("📝 Semantic text splitter configured with percentile threshold")
         else:
             # Default to recursive character text splitter
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -1423,13 +1617,41 @@ class GitHubToQdrantProcessor:
                 f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)"
             )
 
-            batch_embeddings = self._generate_embeddings_with_retry(
-                batch_texts, max_retries
-            )
+            # Use cache for individual texts in batch
+            batch_embeddings = []
+            texts_to_generate = []
+            cached_indices = []
+
+            for idx, text in enumerate(batch_texts):
+                # Try to get from cache first
+                text_hash = hashlib.md5(text.encode()).hexdigest()
+                if text_hash in self.embedding_cache.cache:
+                    # Use cached embedding
+                    batch_embeddings.append(self.embedding_cache.cache[text_hash])
+                    self.embedding_cache.hits += 1
+                else:
+                    # Mark for generation
+                    texts_to_generate.append(text)
+                    cached_indices.append(idx)
+
+            # Generate embeddings for non-cached texts
+            if texts_to_generate:
+                new_embeddings = self._generate_embeddings_with_retry(
+                    texts_to_generate, max_retries
+                )
+
+                # Add to cache and results
+                for text, embedding in zip(texts_to_generate, new_embeddings):
+                    text_hash = hashlib.md5(text.encode()).hexdigest()
+                    if len(self.embedding_cache.cache) < self.embedding_cache.max_size:
+                        self.embedding_cache.cache[text_hash] = embedding
+                    self.embedding_cache.misses += 1
+                    batch_embeddings.append(embedding)
+
             all_embeddings.extend(batch_embeddings)
 
             # Delay between batches to be gentle on the API
-            if i + embedding_batch_size < len(all_texts):
+            if i + embedding_batch_size < len(all_texts) and texts_to_generate:
                 time.sleep(batch_delay)
 
         # Remove duplicates based on embedding similarity (if enabled)
@@ -1477,35 +1699,15 @@ class GitHubToQdrantProcessor:
                         chunk.page_content, chunk_index, repo_name
                     )
 
-                    # Payload structure with multiple compatibility modes
-                    # n8n expects content at root level, LangChain uses page_content, MCP uses document
-                    payload = {
-                        # Root level content for n8n compatibility
-                        "content": chunk.page_content,  # Primary content field for n8n
-                        "text": chunk.page_content,  # Alternative field name some systems use
-                        # Standard fields for other systems
-                        "page_content": chunk.page_content,  # LangChain standard field
-                        "document": chunk.page_content,  # MCP server compatibility
-                        # Metadata as separate field
-                        "metadata": {
-                            **chunk.metadata,  # Original metadata (source, repository, branch, etc.)
-                            "chunk_id": chunk_index,
-                            "chunk_size": len(chunk.page_content),
-                            "preview": chunk.page_content[:200] + "..."
-                            if len(chunk.page_content) > 200
-                            else chunk.page_content,
-                            "batch_number": batch_num,
-                            "content_hash": hashlib.md5(
-                                chunk.page_content.encode()
-                            ).hexdigest()[:8],  # Short hash for reference
-                        },
-                        # Also include key metadata at root level for easier access
-                        "repository": chunk.metadata.get("repository"),
-                        "branch": chunk.metadata.get("branch"),
-                        "source": chunk.metadata.get("source"),
-                        "chunk_id": chunk_index,
-                        "timestamp": datetime.now().isoformat(),
-                    }
+                    # Use new optimized payload creation
+                    file_path = chunk.metadata.get("source", "unknown")
+                    payload = create_payload(
+                        chunk=chunk,
+                        config=self.config,
+                        chunk_index=chunk_index,
+                        repo_name=repo_name,
+                        file_path=file_path
+                    )
 
                     # Handle named vectors vs default vectors
                     vector_name = self.config["qdrant"].get("vector_name")
@@ -1553,6 +1755,14 @@ class GitHubToQdrantProcessor:
         if duplicate_count > 0:
             print(
                 f"   📊 Deduplication stats: {duplicate_count} duplicates removed from {original_count} original chunks"
+            )
+
+        # Display cache statistics
+        cache_stats = self.embedding_cache.get_stats()
+        if cache_stats["hits"] > 0 or cache_stats["misses"] > 0:
+            print(
+                f"   💾 Cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses "
+                f"({cache_stats['hit_rate']} hit rate)"
             )
 
     def _process_and_upload_documents_with_stats(
@@ -1908,18 +2118,19 @@ def process_repository_list(
     overall_duration = datetime.now() - overall_start_time
 
     # Print summary report
-    print_summary_report(results, overall_duration)
+    print_summary_report(results, overall_duration, processor)
 
     return results
 
 
-def print_summary_report(results: List[ProcessingResult], overall_duration):
+def print_summary_report(results: List[ProcessingResult], overall_duration, processor: GitHubToQdrantProcessor):
     """
     Print a comprehensive summary report of multi-repository processing.
 
     Args:
         results: List of ProcessingResult objects
         overall_duration: Total processing time
+        processor: GitHubToQdrantProcessor instance for cache stats
     """
     successful = [r for r in results if r.status == "success"]
     failed = [r for r in results if r.status == "failed"]
@@ -1959,6 +2170,16 @@ def print_summary_report(results: List[ProcessingResult], overall_duration):
     print(f"   Files processed: {total_files:,}")
     print(f"   Chunks created: {total_chunks:,}")
     print(f"   Processing time: {overall_duration.total_seconds():.1f}s")
+
+    # Display overall cache statistics
+    cache_stats = processor.embedding_cache.get_stats()
+    if cache_stats["hits"] > 0 or cache_stats["misses"] > 0:
+        print()
+        print("Embedding Cache Performance:")
+        print(f"   💾 Total hits: {cache_stats['hits']:,}")
+        print(f"   💾 Total misses: {cache_stats['misses']:,}")
+        print(f"   💾 Hit rate: {cache_stats['hit_rate']}")
+        print(f"   💾 Cache size: {cache_stats['size']}/{processor.embedding_cache.max_size}")
 
     if overall_duration.total_seconds() > 60:
         minutes = int(overall_duration.total_seconds() // 60)
