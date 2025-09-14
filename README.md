@@ -21,6 +21,10 @@ This project automatically processes GitHub repositories containing documentatio
 - 🛡️ **Production Ready**: Error handling, rate limiting, retry logic
 - 🎛️ **Highly Configurable**: YAML configs with environment variable support
 - 📚 **150+ File Types**: Process code, docs, configs, PDFs, and more
+- 💾 **Embedding Cache**: LRU cache reduces API calls by 20-30% (v0.3.2)
+- 🎨 **Semantic Chunking**: Context-aware text splitting for better retrieval (v0.3.1)
+- 📈 **Quality Scoring**: Rank chunks by information density and relevance (v0.3.2)
+- 🔧 **Configurable Payloads**: Choose content fields for compatibility (v0.3.2)
 
 ### 🎯 Perfect For
 
@@ -175,11 +179,22 @@ qdrant:
 processing:
   chunk_size: 1000              # Characters per chunk
   chunk_overlap: 200            # Overlap for context
+  chunking_strategy: semantic   # 'semantic' or 'recursive' (v0.3.1+)
   embedding_batch_size: 50      # Optimized batch size
   batch_delay_seconds: 1        # Required for Azure OpenAI
   deduplication_enabled: true   # Enable smart deduplication
   similarity_threshold: 0.95    # Duplicate detection threshold
   file_mode: all_text          # Process all text files (or markdown_only)
+
+# New in v0.3.2: Configurable payload fields
+payload:
+  content_fields:
+    - content      # For n8n compatibility
+    - page_content # For LangChain
+    - document     # For MCP compatibility
+    - text         # Alternative field name
+  preview_length: 200           # Preview snippet length
+  minimal_mode: false           # Reduce payload size by 50%
 ```
 
 ## 🚀 Usage Examples
@@ -275,6 +290,12 @@ Totals:
    Files processed: 1,202
    Chunks created: 6,269
    Processing time: 240.3s (4m 0s)
+
+Embedding Cache Performance:
+   💾 Total hits: 1,543
+   💾 Total misses: 4,726
+   💾 Hit rate: 24.6%
+   💾 Cache size: 500/500
 ============================================================
 ```
 
@@ -429,48 +450,58 @@ This project features **cutting-edge deduplication** that's **5-15x faster** tha
 
 ## 📦 Data Structure & Metadata
 
-### 🏗️ Payload Structure
+### 🏗️ Payload Structure (Updated v0.3.2)
 
-This project uses the **standard LangChain/Qdrant payload structure** for maximum compatibility with existing tools and frameworks. Each document chunk is stored with the following structure:
+This project uses a **configurable payload structure** for maximum compatibility with n8n, LangChain, MCP, and other frameworks. Each document chunk is stored with the following structure:
 
 ```json
 {
-  "page_content": "Full document text content here...",
-  "document": "Full document text content here...",
-  "content": "Full document text content here...",
-  "text": "Full document text content here...",
-  "metadata": {
-    "source": "github_repository",
-    "repository": "your-repo-name",
-    "branch": "main",
-    "document_type": "combined_text",
-    "chunk_id": 123,
-    "chunk_size": 850,
-    "preview": "First 200 characters of content...",
-    "content_hash": "abc123de",
-    "batch_number": 42,
-    "processed_at": "2025-01-13T12:00:00"
-  },
+  // Configurable content fields (choose which to include via config)
+  "content": "Full document text content here...",      // n8n
+  "page_content": "Full document text content here...",  // LangChain
+  "document": "Full document text content here...",      // MCP
+  "text": "Full document text content here...",          // Alternative
+
+  // Flattened metadata (v0.3.2) - no nesting for better performance
+  "doc_id": "repo-name_file.md_123",
+  "chunk_id": 123,
+  "source": "path/to/file.md",
+  "source_type": "markdown",  // pdf, code, config, etc.
   "repository": "your-repo-name",
   "branch": "main",
-  "source": "github_repository",
-  "chunk_id": 123,
-  "timestamp": "2025-01-13T12:00:00"
+  "preview": "First 200 characters of content...",
+  "chunk_size": 850,
+  "token_count": 213,          // NEW in v0.3.2
+  "quality_score": 0.87,       // NEW in v0.3.2 (0-1 scale)
+  "timestamp": 1705147200,     // Unix timestamp (smaller)
+  "content_hash": "abc123de",
+  "extraction_method": "default",
+
+  // PDF-specific fields (when applicable)
+  "page_number": 5,
+  "total_pages": 42
 }
 ```
 
 ### 📋 Field Descriptions
 
-- **`page_content`** - Full text content of the document chunk (standard LangChain field)
-- **`document`** - Full document text (MCP server compatibility)
-- **`content`** - Full document text (n8n compatibility)
+**Content Fields (configurable via `payload.content_fields`):**
+- **`content`** - Full text for n8n compatibility
+- **`page_content`** - Full text for LangChain compatibility
+- **`document`** - Full text for MCP server compatibility
 - **`text`** - Alternative field name some systems use
-- **`metadata.preview`** - 200-character preview for quick inspection and UI display
-- **`metadata.chunk_id`** - Unique identifier for tracking and deduplication
-- **`metadata.source`** - Document source type (e.g., "github_repository")
-- **`metadata.repository`** - Repository name for filtering and organization
-- **`metadata.content_hash`** - MD5 hash for duplicate detection and verification
-- **Root level fields** - Key metadata duplicated at root for easier access (repository, branch, source, chunk_id, timestamp)
+
+**Metadata Fields (flattened in v0.3.2):**
+- **`doc_id`** - Unique document identifier (repo_file_chunk)
+- **`chunk_id`** - Sequential chunk number
+- **`source`** - Path to source file
+- **`source_type`** - File type (pdf, markdown, code, config, etc.)
+- **`preview`** - Configurable preview snippet (default 200 chars)
+- **`token_count`** - Token count for LLM context management (v0.3.2)
+- **`quality_score`** - Content quality score 0-1 (v0.3.2)
+- **`timestamp`** - Unix timestamp (more compact than ISO)
+- **`content_hash`** - MD5 hash for duplicate detection
+- **`extraction_method`** - How content was extracted
 
 ### ✅ Benefits
 
@@ -652,6 +683,41 @@ echo "Vector database updated successfully"
 - Embedding generation: 6 minutes
 - Deduplication: 3 minutes
 - Upload to Qdrant: 1 minute
+
+## 📝 Changelog
+
+### v0.3.2 (2025-09-14) - Performance & Compatibility
+- ✨ **Embedding Cache**: LRU cache reduces API calls by 20-30%
+- ✨ **Configurable Payloads**: Choose content fields for n8n/LangChain/MCP compatibility
+- ✨ **Quality Scoring**: Rank chunks by information density (0-1 scale)
+- ✨ **Token Counting**: Track tokens for LLM context management
+- 🚀 **Flattened Metadata**: Improved filtering performance
+- 🚀 **CI/CD Optimization**: 10x faster (30s vs 3min)
+- 🐛 Fixed formatting and import issues
+
+### v0.3.1 (2025-09-14) - Semantic Intelligence
+- ✨ **Semantic Chunking**: Context-aware text splitting for 30% better retrieval
+- ✨ **Mistral Vision API**: Extract text/content from images in PDFs
+- 🚀 Improved PDF processing with image extraction
+- 🐛 Fixed PDF processing edge cases
+
+### v0.3.0 (2025-09-12) - Multi-Repository Support
+- ✨ **Multi-Repository Processing**: Process multiple repos with one command
+- ✨ **Repository Lists**: YAML configuration for batch processing
+- 📊 Comprehensive summary reports with statistics
+- 🚀 Shared resources across repositories
+
+### v0.2.0 (2025-09-10) - Enhanced Processing
+- ✨ **PDF Processing**: Three modes (local, cloud, hybrid)
+- ✨ **Mistral OCR API**: Cloud-based PDF extraction
+- ✨ **150+ File Types**: Extended file type support
+- 🚀 **5-15x Faster**: Vectorized deduplication
+
+### v0.1.0 (2025-09-08) - Initial Release
+- 🎉 Initial public release
+- ✨ Azure OpenAI and Mistral AI support
+- ✨ Basic markdown and text processing
+- ✨ Qdrant integration
 
 ## 📜 License
 
