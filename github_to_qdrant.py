@@ -83,7 +83,7 @@ class EmbeddingCache:
             "hits": self.hits,
             "misses": self.misses,
             "hit_rate": f"{hit_rate:.1f}%",
-            "size": len(self.cache)
+            "size": len(self.cache),
         }
 
 
@@ -91,26 +91,37 @@ def detect_source_type(file_path: str) -> str:
     """Detect source type from file extension."""
     ext = os.path.splitext(file_path)[1].lower()
 
-    if ext == '.pdf':
-        return 'pdf'
-    elif ext in ['.md', '.markdown', '.mdx']:
-        return 'markdown'
-    elif ext in ['.py', '.js', '.ts', '.java', '.go', '.rs', '.cpp', '.c', '.h', '.hpp']:
-        return 'code'
-    elif ext in ['.yaml', '.yml', '.json', '.toml', '.ini', '.cfg', '.conf']:
-        return 'config'
-    elif ext in ['.txt', '.text']:
-        return 'text'
-    elif ext in ['.html', '.htm', '.xml']:
-        return 'markup'
-    elif ext in ['.css', '.scss', '.sass', '.less']:
-        return 'stylesheet'
-    elif ext in ['.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd']:
-        return 'script'
-    elif ext in ['.sql']:
-        return 'database'
+    if ext == ".pdf":
+        return "pdf"
+    elif ext in [".md", ".markdown", ".mdx"]:
+        return "markdown"
+    elif ext in [
+        ".py",
+        ".js",
+        ".ts",
+        ".java",
+        ".go",
+        ".rs",
+        ".cpp",
+        ".c",
+        ".h",
+        ".hpp",
+    ]:
+        return "code"
+    elif ext in [".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".conf"]:
+        return "config"
+    elif ext in [".txt", ".text"]:
+        return "text"
+    elif ext in [".html", ".htm", ".xml"]:
+        return "markup"
+    elif ext in [".css", ".scss", ".sass", ".less"]:
+        return "stylesheet"
+    elif ext in [".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd"]:
+        return "script"
+    elif ext in [".sql"]:
+        return "database"
     else:
-        return 'document'
+        return "document"
 
 
 def calculate_quality_score(chunk: Document) -> float:
@@ -140,11 +151,16 @@ def calculate_quality_score(chunk: Document) -> float:
 
     # 3. Content type bonus (20% weight)
     content_lower = content.lower()
-    if "```" in content or "def " in content or "function " in content or "class " in content:
+    if (
+        "```" in content
+        or "def " in content
+        or "function " in content
+        or "class " in content
+    ):
         content_type_score = 1.0  # Code blocks
     elif "##" in content or "**" in content:
         content_type_score = 0.9  # Formatted markdown
-    elif "." in content and len(content.split('.')) > 2:
+    elif "." in content and len(content.split(".")) > 2:
         content_type_score = 0.8  # Prose with sentences
     else:
         content_type_score = 0.6  # Plain text
@@ -152,9 +168,22 @@ def calculate_quality_score(chunk: Document) -> float:
 
     # 4. Keyword richness (20% weight)
     # Technical terms and documentation keywords
-    tech_keywords = ['api', 'function', 'class', 'method', 'parameter',
-                     'return', 'example', 'usage', 'config', 'install',
-                     'import', 'export', 'interface', 'implementation']
+    tech_keywords = [
+        "api",
+        "function",
+        "class",
+        "method",
+        "parameter",
+        "return",
+        "example",
+        "usage",
+        "config",
+        "install",
+        "import",
+        "export",
+        "interface",
+        "implementation",
+    ]
     keyword_count = sum(1 for kw in tech_keywords if kw in content_lower)
     keyword_score = min(1.0, keyword_count / 3)  # Cap at 3 keywords
     score_components.append(keyword_score * 0.2)
@@ -162,8 +191,13 @@ def calculate_quality_score(chunk: Document) -> float:
     return round(sum(score_components), 2)
 
 
-def create_payload(chunk: Document, config: Dict[str, Any], chunk_index: int,
-                  repo_name: str, file_path: str) -> Dict[str, Any]:
+def create_payload(
+    chunk: Document,
+    config: Dict[str, Any],
+    chunk_index: int,
+    repo_name: str,
+    file_path: str,
+) -> Dict[str, Any]:
     """Create optimized payload with configurable content fields."""
 
     # Get content field configuration
@@ -180,7 +214,7 @@ def create_payload(chunk: Document, config: Dict[str, Any], chunk_index: int,
     preview = chunk.page_content[:preview_length]
     if len(chunk.page_content) > preview_length:
         # Try to cut at word boundary
-        last_space = preview.rfind(' ')
+        last_space = preview.rfind(" ")
         if last_space > preview_length * 0.8:  # Only cut at word if not losing too much
             preview = preview[:last_space] + "..."
         else:
@@ -194,28 +228,27 @@ def create_payload(chunk: Document, config: Dict[str, Any], chunk_index: int,
         payload[field_name] = chunk.page_content
 
     # Add flattened metadata (no nesting)
-    payload.update({
-        # Identifiers
-        "doc_id": f"{repo_name}_{os.path.basename(file_path)}_{chunk_index}",
-        "chunk_id": chunk_index,
-
-        # Source information
-        "source": chunk.metadata.get("source", file_path),
-        "source_type": detect_source_type(file_path),
-        "repository": chunk.metadata.get("repository", repo_name),
-        "branch": chunk.metadata.get("branch", "main"),
-
-        # Content metrics
-        "preview": preview,
-        "chunk_size": len(chunk.page_content),
-        "token_count": len(chunk.page_content.split()),
-        "quality_score": calculate_quality_score(chunk),
-
-        # Processing metadata
-        "timestamp": int(datetime.now().timestamp()),
-        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
-        "extraction_method": chunk.metadata.get("extraction_method", "default"),
-    })
+    payload.update(
+        {
+            # Identifiers
+            "doc_id": f"{repo_name}_{os.path.basename(file_path)}_{chunk_index}",
+            "chunk_id": chunk_index,
+            # Source information
+            "source": chunk.metadata.get("source", file_path),
+            "source_type": detect_source_type(file_path),
+            "repository": chunk.metadata.get("repository", repo_name),
+            "branch": chunk.metadata.get("branch", "main"),
+            # Content metrics
+            "preview": preview,
+            "chunk_size": len(chunk.page_content),
+            "token_count": len(chunk.page_content.split()),
+            "quality_score": calculate_quality_score(chunk),
+            # Processing metadata
+            "timestamp": int(datetime.now().timestamp()),
+            "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
+            "extraction_method": chunk.metadata.get("extraction_method", "default"),
+        }
+    )
 
     # Add PDF-specific metadata if applicable
     if chunk.metadata.get("page"):
@@ -224,7 +257,12 @@ def create_payload(chunk: Document, config: Dict[str, Any], chunk_index: int,
 
     # Add any additional metadata that's not already included
     for key, value in chunk.metadata.items():
-        if key not in payload and key not in ['page_content', 'content', 'text', 'document']:
+        if key not in payload and key not in [
+            "page_content",
+            "content",
+            "text",
+            "document",
+        ]:
             payload[key] = value
 
     return payload
@@ -549,7 +587,9 @@ class GitHubToQdrantProcessor:
         self._test_connections()
 
         # Initialize text splitter based on strategy
-        chunking_strategy = self.config["processing"].get("chunking_strategy", "recursive")
+        chunking_strategy = self.config["processing"].get(
+            "chunking_strategy", "recursive"
+        )
 
         if chunking_strategy == "semantic":
             # Use semantic chunking with embeddings
@@ -1706,7 +1746,7 @@ class GitHubToQdrantProcessor:
                         config=self.config,
                         chunk_index=chunk_index,
                         repo_name=repo_name,
-                        file_path=file_path
+                        file_path=file_path,
                     )
 
                     # Handle named vectors vs default vectors
@@ -2123,7 +2163,11 @@ def process_repository_list(
     return results
 
 
-def print_summary_report(results: List[ProcessingResult], overall_duration, processor: GitHubToQdrantProcessor):
+def print_summary_report(
+    results: List[ProcessingResult],
+    overall_duration,
+    processor: GitHubToQdrantProcessor,
+):
     """
     Print a comprehensive summary report of multi-repository processing.
 
@@ -2179,7 +2223,9 @@ def print_summary_report(results: List[ProcessingResult], overall_duration, proc
         print(f"   💾 Total hits: {cache_stats['hits']:,}")
         print(f"   💾 Total misses: {cache_stats['misses']:,}")
         print(f"   💾 Hit rate: {cache_stats['hit_rate']}")
-        print(f"   💾 Cache size: {cache_stats['size']}/{processor.embedding_cache.max_size}")
+        print(
+            f"   💾 Cache size: {cache_stats['size']}/{processor.embedding_cache.max_size}"
+        )
 
     if overall_duration.total_seconds() > 60:
         minutes = int(overall_duration.total_seconds() // 60)
