@@ -13,13 +13,14 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Protocol, Union
 from urllib.parse import urlparse
 
 import yaml
@@ -38,6 +39,18 @@ from pdf_processor import PDFProcessor
 
 # Type hints
 from dataclasses import dataclass
+
+
+class EmbeddingInterface(Protocol):
+    """Protocol defining the interface for embedding clients."""
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a list of documents."""
+        ...
+
+    def embed_query(self, text: str) -> List[float]:
+        """Generate embedding for a single query."""
+        ...
 
 
 class EmbeddingCache:
@@ -274,7 +287,7 @@ class RepositoryConfig:
 
     url: str
     branch: Optional[str] = None
-    collection_name: str = None
+    collection_name: Optional[str] = None
 
 
 @dataclass
@@ -552,6 +565,9 @@ class GitHubToQdrantProcessor:
         self.config = self._load_config(config_path)
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
+        self.embeddings: Union[
+            MistralEmbeddingClient, SentenceTransformerClient, AzureOpenAIEmbeddings
+        ]
 
         print(f"🎯 Target collection: {self.config['qdrant']['collection_name']}")
 
@@ -594,7 +610,7 @@ class GitHubToQdrantProcessor:
         if chunking_strategy == "semantic":
             # Use semantic chunking with embeddings
             self.text_splitter = SemanticChunker(
-                embeddings=self.embeddings,
+                embeddings=self.embeddings,  # type: ignore
                 breakpoint_threshold_type="percentile",
                 breakpoint_threshold_amount=95,  # 95th percentile for semantic similarity
             )
@@ -635,7 +651,11 @@ class GitHubToQdrantProcessor:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
 
-    def _initialize_embeddings(self):
+    def _initialize_embeddings(
+        self,
+    ) -> Union[
+        MistralEmbeddingClient, SentenceTransformerClient, AzureOpenAIEmbeddings
+    ]:
         """
         Initialize embeddings client based on provider selection.
 
@@ -1230,19 +1250,34 @@ class GitHubToQdrantProcessor:
 
         return "".join(content_parts)
 
-    def _generate_chunk_id(self, content: str, chunk_index: int, repo_name: str) -> str:
+    def _generate_chunk_id(
+        self,
+        content: str,
+        chunk_index: int,
+        repo_name: str,
+        file_path: Optional[str] = None,  # noqa: ARG002
+    ) -> str:
         """
         Generate deterministic UUID for document chunk.
 
         Creates consistent, reproducible IDs for chunks based on content hash,
-        repository name, and chunk index. This ensures that re-processing the same
-        repository produces identical chunk IDs, enabling efficient updates and
-        avoiding duplicate entries in Qdrant.
+        repository name, and optionally the source file path. This ensures that
+        re-processing the same repository produces identical chunk IDs for identical
+        content, enabling efficient updates and avoiding duplicate entries in Qdrant.
+
+        The ID is based on:
+        - Repository name (constant across runs)
+        - File path (if provided, ensures file-specific uniqueness)
+        - Content hash (ensures content uniqueness)
+
+        This approach ensures the same content always gets the same ID, regardless
+        of processing order or when files are added/removed from the repository.
 
         Args:
             content: Chunk text content
-            chunk_index: Sequential chunk number
+            chunk_index: Sequential chunk number (kept for compatibility but not used)
             repo_name: Repository name for uniqueness
+            file_path: Optional source file path for additional uniqueness
 
         Returns:
             Deterministic UUID string
@@ -1252,7 +1287,16 @@ class GitHubToQdrantProcessor:
 
         # Create a deterministic UUID from the hash
         namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
-        unique_string = f"{repo_name}_{chunk_index}_{content_hash}"
+
+        # Use file path if provided, otherwise just repo and content
+        if file_path:
+            # Normalize the file path to ensure consistency
+            normalized_path = file_path.replace("\\", "/").strip("/")
+            unique_string = f"{repo_name}_{normalized_path}_{content_hash}"
+        else:
+            # Fallback for backward compatibility
+            unique_string = f"{repo_name}_{content_hash}"
+
         return str(uuid.uuid5(namespace, unique_string))
 
     def _calculate_similarity(self, vec1: List[float], vec2: List[float]) -> float:
@@ -1735,12 +1779,13 @@ class GitHubToQdrantProcessor:
                 ):
                     # Generate deterministic ID for chunk
                     chunk_index = i + j
+                    # Get file path from metadata for consistent ID generation
+                    file_path = chunk.metadata.get("source", "unknown")
                     point_id = self._generate_chunk_id(
-                        chunk.page_content, chunk_index, repo_name
+                        chunk.page_content, chunk_index, repo_name, file_path
                     )
 
                     # Use new optimized payload creation
-                    file_path = chunk.metadata.get("source", "unknown")
                     payload = create_payload(
                         chunk=chunk,
                         config=self.config,
@@ -1949,7 +1994,10 @@ class GitHubToQdrantProcessor:
                 return (files_processed, chunks_created)
 
             finally:
-                if self.config["github"]["cleanup_after_processing"]:
+                if (
+                    self.config["github"]["cleanup_after_processing"]
+                    and not interrupted
+                ):
                     print("🧹 Cleaning up temporary files")
 
         return (files_processed, chunks_created)
@@ -2041,7 +2089,10 @@ class GitHubToQdrantProcessor:
                 print(f"❌ Error processing repository: {e}")
                 raise
             finally:
-                if self.config["github"]["cleanup_after_processing"]:
+                if (
+                    self.config["github"]["cleanup_after_processing"]
+                    and not interrupted
+                ):
                     print("🧹 Cleaning up temporary files")
 
 
@@ -2146,7 +2197,7 @@ def process_repository_list(
             # Create failed result
             result = ProcessingResult(
                 repo_url=repo_config.url,
-                collection_name=repo_config.collection_name,
+                collection_name=repo_config.collection_name or "default",
                 status="failed",
                 error=error_msg,
             )
@@ -2237,8 +2288,30 @@ def print_summary_report(
     print("=" * 60)
 
 
+# Global flag to track interruption
+interrupted = False
+
+
+def signal_handler(_signum, _frame):
+    """Handle interrupt signals gracefully."""
+    global interrupted
+    interrupted = True
+    # Suppress any further output from libraries
+    sys.stderr = open(os.devnull, "w")
+    sys.stdout.write("\n\n⚠️  Process interrupted by user (Ctrl+C)\n")
+    sys.stdout.write("🧹 Cleaning up and exiting...\n")
+    sys.stdout.flush()
+    sys.exit(130)  # Standard Unix exit code for SIGINT
+
+
 def main():
     """Main entry point."""
+    # Set up signal handler for clean interruption
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Load environment variables from .env file
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         description="Process GitHub repository text files into Qdrant vector database"
     )
@@ -2268,6 +2341,11 @@ def main():
             # Process single repository (current behavior)
             processor.process_repository(args.repo_url)
 
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully without showing traceback
+        print("\n\n⚠️  Process interrupted by user (Ctrl+C)")
+        print("🧹 Cleaning up and exiting...")
+        return 130  # Standard Unix exit code for SIGINT
     except Exception as e:
         logging.error("Script failed: %s", e)
         return 1
