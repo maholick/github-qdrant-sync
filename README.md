@@ -21,6 +21,8 @@ This project automatically processes GitHub repositories containing documentatio
 - 🛡️ **Production Ready**: Error handling, rate limiting, retry logic
 - 🎛️ **Highly Configurable**: YAML configs with environment variable support
 - 📚 **150+ File Types**: Process code, docs, configs, PDFs, and more
+- 📄 **Individual File Processing**: Maintain document boundaries for better search (v0.3.3)
+- 🔒 **Deterministic IDs**: Consistent vector IDs across runs prevent duplicates (v0.3.3)
 - 💾 **Embedding Cache**: LRU cache reduces API calls by 20-30% (v0.3.2)
 - 🎨 **Semantic Chunking**: Context-aware text splitting for better retrieval (v0.3.1)
 - 📈 **Quality Scoring**: Rank chunks by information density and relevance (v0.3.2)
@@ -685,6 +687,15 @@ echo "Vector database updated successfully"
 - Upload to Qdrant: 1 minute
 
 ## 📝 Changelog
+
+### v0.3.3 (2025-09-16) - Individual File Processing & Deduplication
+- ✨ **Individual File Processing**: Process files separately for better context preservation
+- ✨ **Deterministic ID Generation**: Fixed duplicate vector creation on repeated runs
+- 🐛 **Fixed Duplicate Vectors**: Resolved issue where each run added exactly 1 duplicate vector
+- 🐛 **Fixed combine_documents Setting**: Properly respects `combine_documents: false` configuration
+- 🚀 **Clean Interrupt Handling**: Improved Ctrl+C handling without verbose tracebacks
+- 🔧 **Type Safety**: Fixed type annotations for better IDE support
+- 📊 **Better Search Quality**: Individual file processing maintains document boundaries
 
 ### v0.3.2 (2025-09-14) - Performance & Compatibility
 - ✨ **Embedding Cache**: LRU cache reduces API calls by 20-30%
