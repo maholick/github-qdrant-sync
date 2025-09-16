@@ -88,6 +88,35 @@ class EmbeddingCache:
         self.access_order.append(text_hash)
         return embedding
 
+    def get(self, text: str):
+        """Get cached embedding if it exists, otherwise return None."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+
+        if text_hash in self.cache:
+            self.hits += 1
+            # Move to end (most recently used)
+            self.access_order.remove(text_hash)
+            self.access_order.append(text_hash)
+            return self.cache[text_hash]
+
+        self.misses += 1
+        return None
+
+    def set(self, text: str, embedding):
+        """Add embedding to cache."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+
+        # Add to cache with LRU eviction
+        if len(self.cache) >= self.max_size and text_hash not in self.cache:
+            # Remove least recently used
+            lru_hash = self.access_order.pop(0)
+            del self.cache[lru_hash]
+
+        self.cache[text_hash] = embedding
+        if text_hash in self.access_order:
+            self.access_order.remove(text_hash)
+        self.access_order.append(text_hash)
+
     def get_stats(self):
         """Return cache statistics."""
         total = self.hits + self.misses
@@ -1130,11 +1159,10 @@ class GitHubToQdrantProcessor:
             f"This document contains all {file_type} files from the repository, organized by folder.\n\n"
         )
         all_combined_content.append(
-            f"📊 **Statistics**: {len(text_files)} files from {len(folder_groups)} folders\n"
+            f"📊 **Statistics**: {len(text_files)} files from {len(folder_groups)} folders\n\n"
         )
-        all_combined_content.append(
-            f"🕒 **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        )
+        # Note: Timestamp removed from content to ensure deterministic IDs
+        # Timestamp is still available in metadata for tracking
         all_combined_content.append("---\n\n")
 
         successful_reads = 0
@@ -1163,8 +1191,8 @@ class GitHubToQdrantProcessor:
             total_chars += len(root_content)
             print(f"   ✅ Created: {os.path.basename(root_file_path)}")
 
-        # Process each folder
-        for folder_name, files in folder_groups.items():
+        # Process each folder in sorted order for consistency
+        for folder_name, files in sorted(folder_groups.items()):
             print(f"\n📝 Processing folder '{folder_name}' with {len(files)} files...")
             folder_content = self._combine_files_in_group(
                 files, folder_name, repo_root, pdf_processor
@@ -1630,6 +1658,356 @@ class GitHubToQdrantProcessor:
         else:
             print(f"📚 Using existing collection: {collection_name}")
 
+    def _process_files_individually(
+        self, text_files: List[str], repo_name: str, repo_root: str
+    ) -> int:
+        """
+        Process each file individually for better context and search quality.
+
+        This method processes files one by one, maintaining file-level metadata
+        and creating chunks that preserve document boundaries. This approach
+        provides better search relevance compared to combining all documents.
+
+        Args:
+            text_files: List of file paths to process
+            repo_name: Repository name for metadata
+            repo_root: Repository root directory
+
+        Returns:
+            Total number of chunks created
+        """
+        print(f"\n📊 Processing {len(text_files)} files individually...")
+
+        all_chunks = []
+        all_file_paths = []
+
+        # Initialize PDF processor if needed
+        pdf_processor = None
+        if self.config.get("pdf_processing", {}).get("enabled", False):
+            pdf_processor = PDFProcessor(self.config, self.logger)
+            print("   📑 PDF processing enabled")
+
+        # Process each file
+        for i, file_path in enumerate(text_files, 1):
+            relative_path = os.path.relpath(file_path, repo_root)
+
+            # Skip if file hasn't changed (if tracking is enabled)
+            if self.config["processing"].get("track_file_changes", False):
+                file_hash = self._calculate_file_hash(file_path)
+                if self._is_file_unchanged(relative_path, file_hash):
+                    print(f"   ⏭️  Skipping unchanged file: {relative_path}")
+                    continue
+
+            print(f"   📄 [{i}/{len(text_files)}] Processing: {relative_path}")
+
+            try:
+                # Read file content
+                if file_path.lower().endswith(".pdf") and pdf_processor:
+                    pdf_docs = pdf_processor.process_pdf(file_path)
+                    if pdf_docs:
+                        file_content = "\n\n".join(
+                            [doc.page_content for doc in pdf_docs]
+                        )
+                    else:
+                        print(
+                            f"      ⚠️  No content extracted from PDF: {relative_path}"
+                        )
+                        continue
+                else:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        file_content = f.read()
+
+                if not file_content.strip():
+                    print(f"      ⚠️  Empty file: {relative_path}")
+                    continue
+
+                # Create document with file-specific metadata
+                document = Document(
+                    page_content=file_content,
+                    metadata={
+                        "source": relative_path,
+                        "file_path": relative_path,
+                        "repository": repo_name,
+                        "branch": self.config["github"].get("branch", "main"),
+                        "document_type": self._get_document_type(file_path),
+                        "file_size": os.path.getsize(file_path),
+                    },
+                )
+
+                # Split document into chunks
+                file_chunks = self.text_splitter.split_documents([document])
+
+                # Add chunk-specific metadata
+                for j, chunk in enumerate(file_chunks):
+                    chunk.metadata["chunk_index"] = j
+                    chunk.metadata["total_chunks"] = len(file_chunks)
+                    chunk.metadata["file_path"] = relative_path
+
+                all_chunks.extend(file_chunks)
+                all_file_paths.extend([relative_path] * len(file_chunks))
+
+                print(f"      ✅ Created {len(file_chunks)} chunks")
+
+            except Exception as e:
+                print(f"      ❌ Error processing {relative_path}: {e}")
+                continue
+
+        if not all_chunks:
+            print("⚠️  No chunks created from any files")
+            return 0
+
+        print(
+            f"\n📊 Total chunks created: {len(all_chunks)} from {len(set(all_file_paths))} files"
+        )
+
+        # Process and upload chunks with file-aware metadata
+        self._upload_chunks_with_file_metadata(all_chunks, repo_name)
+
+        return len(all_chunks)
+
+    def _calculate_file_hash(self, file_path: str) -> str:
+        """Calculate hash of file content for change detection."""
+        hasher = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _is_file_unchanged(self, relative_path: str, file_hash: str) -> bool:  # noqa: ARG002
+        """Check if file has changed since last processing."""
+        # TODO: Implement file hash tracking (could use a local cache file or Qdrant metadata)
+        # For now, return False to always process files
+        return False
+
+    def _get_document_type(self, file_path: str) -> str:
+        """Determine document type from file extension."""
+        ext = os.path.splitext(file_path)[1].lower()
+        type_map = {
+            ".md": "markdown",
+            ".py": "python",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".java": "java",
+            ".go": "go",
+            ".rs": "rust",
+            ".cpp": "cpp",
+            ".c": "c",
+            ".html": "html",
+            ".css": "css",
+            ".json": "json",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".pdf": "pdf",
+            ".txt": "text",
+        }
+        return type_map.get(ext, "text")
+
+    def _upload_chunks_with_file_metadata(
+        self, chunks: List[Document], repo_name: str
+    ) -> None:
+        """
+        Upload chunks to Qdrant with file-aware metadata and improved ID generation.
+
+        This method handles embedding generation and upload for chunks that have
+        been processed from individual files, maintaining file-level context
+        and metadata for better search quality.
+
+        Args:
+            chunks: List of document chunks with file metadata
+            repo_name: Repository name for ID generation
+        """
+        if not chunks:
+            return
+
+        print("\n🧠 Processing and uploading chunks to Qdrant...")
+        print(f"📝 Processing {len(chunks)} chunks from individual files")
+
+        # Calculate processing stats
+        total_chars = sum(len(chunk.page_content) for chunk in chunks)
+        avg_chunk_size = total_chars / len(chunks) if chunks else 0
+        print(f"📊 Average chunk size: {avg_chunk_size:.0f} characters")
+
+        # Generate embeddings for ALL chunks
+        print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
+        all_texts = [chunk.page_content for chunk in chunks]
+
+        embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
+        batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
+
+        all_embeddings = []
+
+        for i in range(0, len(all_texts), embedding_batch_size):
+            batch_texts = all_texts[i : i + embedding_batch_size]
+            batch_num = (i // embedding_batch_size) + 1
+            total_embedding_batches = (
+                len(all_texts) + embedding_batch_size - 1
+            ) // embedding_batch_size
+
+            print(
+                f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)"
+            )
+
+            # Check cache first
+            batch_embeddings = []
+            texts_to_generate = []
+            text_indices = []
+
+            for idx, text in enumerate(batch_texts):
+                cached_embedding = self.embedding_cache.get(text)
+                if cached_embedding is not None:
+                    batch_embeddings.append(cached_embedding)
+                else:
+                    texts_to_generate.append(text)
+                    text_indices.append(idx)
+
+            # Generate embeddings for non-cached texts
+            if texts_to_generate:
+                new_embeddings = self._generate_embeddings_with_retry(texts_to_generate)
+
+                # Cache the new embeddings
+                for text, embedding in zip(texts_to_generate, new_embeddings):
+                    self.embedding_cache.set(text, embedding)
+
+                # Insert new embeddings into batch at correct positions
+                for idx, embedding in zip(text_indices, new_embeddings):
+                    batch_embeddings.insert(idx, embedding)
+
+            all_embeddings.extend(batch_embeddings)
+
+            # Delay between batches to be gentle on the API
+            if i + embedding_batch_size < len(all_texts) and texts_to_generate:
+                time.sleep(batch_delay)
+
+        # Remove duplicates based on embedding similarity (if enabled)
+        if self.config["processing"].get("deduplication_enabled", True):
+            print("🔍 Running deduplication analysis...")
+            similarity_threshold = self.config["processing"].get(
+                "similarity_threshold", 0.95
+            )
+            unique_chunks, unique_embeddings = self._remove_duplicates(
+                chunks, all_embeddings, similarity_threshold=similarity_threshold
+            )
+        else:
+            print("ℹ️  Deduplication disabled - using all chunks")
+            unique_chunks, unique_embeddings = chunks, all_embeddings
+
+        if not unique_chunks:
+            print("❌ No unique chunks remaining after deduplication!")
+            return
+
+        # Process unique chunks in batches for upload
+        batch_size = 10
+        collection_name = self.config["qdrant"]["collection_name"]
+        total_batches = (len(unique_chunks) + batch_size - 1) // batch_size
+
+        print(
+            f"🚀 Starting batch upload: {total_batches} batches of {batch_size} chunks each"
+        )
+
+        successful_uploads = 0
+
+        for i in range(0, len(unique_chunks), batch_size):
+            batch_num = i // batch_size + 1
+            batch_chunks = unique_chunks[i : i + batch_size]
+            batch_embeddings = unique_embeddings[i : i + batch_size]
+
+            try:
+                # Create points for Qdrant
+                points = []
+                for j, (chunk, embedding) in enumerate(
+                    zip(batch_chunks, batch_embeddings)
+                ):
+                    # Generate deterministic ID using file path and content
+                    file_path = chunk.metadata.get("file_path", "unknown")
+                    chunk_index = chunk.metadata.get("chunk_index", j)
+
+                    # Enhanced ID generation with file path
+                    point_id = self._generate_file_aware_chunk_id(
+                        chunk.page_content, chunk_index, repo_name, file_path
+                    )
+
+                    # Use new optimized payload creation with file metadata
+                    payload = create_payload(
+                        chunk=chunk,
+                        config=self.config,
+                        chunk_index=chunk_index,
+                        repo_name=repo_name,
+                        file_path=file_path,
+                    )
+
+                    # Handle named vectors vs default vectors
+                    vector_name = self.config["qdrant"].get("vector_name")
+                    if vector_name:
+                        points.append(
+                            PointStruct(
+                                id=point_id,
+                                vector={vector_name: embedding},
+                                payload=payload,
+                            )
+                        )
+                    else:
+                        points.append(
+                            PointStruct(id=point_id, vector=embedding, payload=payload)
+                        )
+
+                # Upload batch to Qdrant
+                self.qdrant_client.upsert(
+                    collection_name=collection_name, points=points
+                )
+
+                successful_uploads += len(batch_chunks)
+                print(
+                    f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)"
+                )
+
+                # Show progress periodically
+                if batch_num % 10 == 0 or batch_num == total_batches:
+                    progress = (successful_uploads / len(unique_chunks)) * 100
+                    print(
+                        f"  📊 Progress: {progress:.0f}% ({successful_uploads}/{len(unique_chunks)} unique chunks)"
+                    )
+
+            except Exception as e:
+                print(f"  ❌ Error uploading batch {batch_num}: {e}")
+                raise
+
+        print(
+            f"\n✅ Upload completed: {successful_uploads} chunks uploaded to collection '{collection_name}'"
+        )
+
+    def _generate_file_aware_chunk_id(
+        self, content: str, chunk_index: int, repo_name: str, file_path: str
+    ) -> str:
+        """
+        Generate deterministic UUID for document chunk with file awareness.
+
+        This improved version ensures unique IDs for chunks from different files
+        even if they have similar content, by incorporating the full file path
+        and chunk position within that specific file.
+
+        Args:
+            content: Chunk text content
+            chunk_index: Chunk index within the file
+            repo_name: Repository name
+            file_path: Relative file path within repository
+
+        Returns:
+            Deterministic UUID string
+        """
+        # Create deterministic UUID based on content hash and file context
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+
+        # Create a deterministic UUID from the hash
+        namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
+
+        # Normalize the file path to ensure consistency
+        normalized_path = file_path.replace("\\", "/").strip("/")
+
+        # Include chunk index in the unique string for file-specific positioning
+        unique_string = f"{repo_name}_{normalized_path}_{chunk_index}_{content_hash}"
+
+        return str(uuid.uuid5(namespace, unique_string))
+
     def _process_and_upload_documents(
         self, combined_content: str, repo_name: str
     ) -> None:
@@ -1785,6 +2163,13 @@ class GitHubToQdrantProcessor:
                         chunk.page_content, chunk_index, repo_name, file_path
                     )
 
+                    # Debug: Log first 100 chars of content and generated ID
+                    if j == 0 and i == 0:  # Only log first chunk of first batch
+                        content_preview = chunk.page_content[:100].replace("\n", " ")
+                        print(f"   🔍 Debug - First chunk ID: {point_id[:8]}...")
+                        print(f"   🔍 Debug - Content preview: {content_preview}...")
+                        print(f"   🔍 Debug - Source: {file_path}")
+
                     # Use new optimized payload creation
                     payload = create_payload(
                         chunk=chunk,
@@ -1820,6 +2205,12 @@ class GitHubToQdrantProcessor:
                 print(
                     f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)"
                 )
+
+                # Debug: Log all unique point IDs to help track duplicates
+                if batch_num == 1:  # Log IDs from first batch
+                    print("   🔍 Debug - First batch point IDs:")
+                    for point in points[:3]:  # Show first 3 IDs
+                        print(f"      - {point.id[:16]}...")
 
                 # Show progress every 20 batches or at the end (less verbose)
                 if batch_num % 20 == 0 or batch_num == total_batches:
@@ -1977,19 +2368,27 @@ class GitHubToQdrantProcessor:
                     print(f"⚠️  No {file_type} files found in repository")
                     return (0, 0)
 
-                # Combine text files into folder-based files + overall combined file
-                combined_content = self._combine_text_files(text_files, repo_name)
-
                 # Setup Qdrant collection
                 self._setup_qdrant_collection()
 
-                # Process and upload ONLY the final combined document
-                print(
-                    "\n🎯 Creating vector embeddings for the combined document only..."
-                )
-                chunks_created = self._process_and_upload_documents_with_stats(
-                    combined_content, repo_name
-                )
+                # Check if we should process files individually or combine them
+                if not self.config["processing"].get("combine_documents", True):
+                    # Process files individually for better context and search quality
+                    print("\n📄 Processing files individually for better context...")
+                    chunks_created = self._process_files_individually(
+                        text_files, repo_name, clone_path
+                    )
+                else:
+                    # Legacy mode: Combine text files into folder-based files + overall combined file
+                    combined_content = self._combine_text_files(text_files, repo_name)
+
+                    # Process and upload ONLY the final combined document
+                    print(
+                        "\n🎯 Creating vector embeddings for the combined document only..."
+                    )
+                    chunks_created = self._process_and_upload_documents_with_stats(
+                        combined_content, repo_name
+                    )
 
                 return (files_processed, chunks_created)
 
