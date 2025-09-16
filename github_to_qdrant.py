@@ -2411,8 +2411,8 @@ class GitHubToQdrantProcessor:
 
         Execution Flow:
         1. Repository cloning to temporary directory
-        2. Markdown file discovery with filtering
-        3. Content combination and organization
+        2. Text file discovery with filtering
+        3. Processing based on combine_documents setting
         4. Qdrant collection setup
         5. Document processing and vector upload
         6. Cleanup and reporting
@@ -2435,68 +2435,28 @@ class GitHubToQdrantProcessor:
                 "Repository URL is required either as parameter or in config"
             )
 
+        # Call the internal method which has the proper logic
         repo_name = self._extract_repo_name(repo_url)
-        print(f"\n🎯 Processing repository: {repo_name}")
+        files_processed, chunks_created = self._process_repository_internal(repo_url)
 
-        # Create temporary directory for cloning
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                # Clone repository
-                clone_path = self._clone_repository(repo_url, temp_dir)
+        # Calculate and display final statistics
+        end_time = datetime.now()
+        duration = end_time - start_time
 
-                # Find text files based on configured mode
-                text_files = self._find_text_files(clone_path)
-
-                if not text_files:
-                    file_mode = self.config["processing"].get(
-                        "file_mode", "markdown_only"
-                    )
-                    file_type = "text" if file_mode == "all_text" else "markdown"
-                    print(f"⚠️  No {file_type} files found in repository")
-                    return
-
-                # Combine text files into folder-based files + overall combined file
-                combined_content = self._combine_text_files(text_files, repo_name)
-
-                # Setup Qdrant collection
-                self._setup_qdrant_collection()
-
-                # Process and upload ONLY the final combined document (not individual folder files)
-                print(
-                    "\n🎯 Creating vector embeddings for the combined document only..."
-                )
-                self._process_and_upload_documents(combined_content, repo_name)
-
-                # Calculate and display final statistics
-                end_time = datetime.now()
-                duration = end_time - start_time
-
-                print("\n🎉 Repository processing completed successfully!")
-                print("=" * 60)
-                print("📊 **Final Summary**")
-                print(f"   Repository: {repo_name}")
-                branch = self.config["github"].get("branch")
-                if branch:
-                    print(f"   Branch: {branch}")
-                file_mode = self.config["processing"].get("file_mode", "markdown_only")
-                file_type = "text" if file_mode == "all_text" else "markdown"
-                print(f"   {file_type.capitalize()} files: {len(text_files)}")
-                print(
-                    f"   Total processing time: {duration.total_seconds():.1f} seconds"
-                )
-                print(f"   Collection: {self.config['qdrant']['collection_name']}")
-                print(f"   Output directory: markdown/{repo_name}/")
-                print(f"   Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-            except Exception as e:
-                print(f"❌ Error processing repository: {e}")
-                raise
-            finally:
-                if (
-                    self.config["github"]["cleanup_after_processing"]
-                    and not interrupted
-                ):
-                    print("🧹 Cleaning up temporary files")
+        print("\n🎉 Repository processing completed successfully!")
+        print("=" * 60)
+        print("📊 **Final Summary**")
+        print(f"   Repository: {repo_name}")
+        branch = self.config["github"].get("branch")
+        if branch:
+            print(f"   Branch: {branch}")
+        file_mode = self.config["processing"].get("file_mode", "markdown_only")
+        file_type = "text" if file_mode == "all_text" else "markdown"
+        print(f"   Files processed: {files_processed}")
+        print(f"   Chunks created: {chunks_created}")
+        print(f"   Total processing time: {duration.total_seconds():.1f} seconds")
+        print(f"   Collection: {self.config['qdrant']['collection_name']}")
+        print(f"   Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 def load_repository_list(repo_list_path: str) -> List[RepositoryConfig]:
