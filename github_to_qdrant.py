@@ -2450,8 +2450,6 @@ class GitHubToQdrantProcessor:
         branch = self.config["github"].get("branch")
         if branch:
             print(f"   Branch: {branch}")
-        file_mode = self.config["processing"].get("file_mode", "markdown_only")
-        file_type = "text" if file_mode == "all_text" else "markdown"
         print(f"   Files processed: {files_processed}")
         print(f"   Chunks created: {chunks_created}")
         print(f"   Total processing time: {duration.total_seconds():.1f} seconds")
