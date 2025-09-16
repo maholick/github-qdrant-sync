@@ -2372,7 +2372,10 @@ class GitHubToQdrantProcessor:
                 self._setup_qdrant_collection()
 
                 # Check if we should process files individually or combine them
-                if not self.config["processing"].get("combine_documents", True):
+                combine_docs = self.config["processing"].get("combine_documents", True)
+                print(f"\n🔍 Debug: combine_documents = {combine_docs}")
+
+                if combine_docs is False:  # Explicitly check for False
                     # Process files individually for better context and search quality
                     print("\n📄 Processing files individually for better context...")
                     chunks_created = self._process_files_individually(
@@ -2380,6 +2383,7 @@ class GitHubToQdrantProcessor:
                     )
                 else:
                     # Legacy mode: Combine text files into folder-based files + overall combined file
+                    print("\n📄 Combining documents (legacy mode)...")
                     combined_content = self._combine_text_files(text_files, repo_name)
 
                     # Process and upload ONLY the final combined document
