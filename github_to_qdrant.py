@@ -27,8 +27,8 @@ import yaml
 from dotenv import load_dotenv
 
 import numpy as np
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import AzureOpenAIEmbeddings
 from qdrant_client import QdrantClient

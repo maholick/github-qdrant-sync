@@ -12,7 +12,7 @@ import base64
 import logging
 import os
 from typing import List, Dict, Any, Optional
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 # PyMuPDF (fitz) - optional but recommended
 try:
