@@ -274,6 +274,16 @@ def create_payload(
     for field_name in content_fields:
         payload[field_name] = chunk.page_content
 
+    # Get embedding provider and model information
+    embedding_provider = config.get("embedding_provider", "unknown")
+    embedding_model = "unknown"
+    if embedding_provider == "azure_openai":
+        embedding_model = config.get("azure_openai", {}).get("model", "unknown")
+    elif embedding_provider == "mistral_ai":
+        embedding_model = config.get("mistral_ai", {}).get("model", "unknown")
+    elif embedding_provider == "sentence_transformers":
+        embedding_model = config.get("sentence_transformers", {}).get("model", "unknown")
+
     # Build metadata dictionary
     metadata_dict = {
         # Identifiers
@@ -292,9 +302,12 @@ def create_payload(
         "token_count": len(chunk.page_content.split()),
         "quality_score": calculate_quality_score(chunk),
         # Processing metadata
-        "timestamp": int(datetime.now().timestamp()),
+        "processed_at": datetime.now().isoformat(),
         "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
         "extraction_method": chunk.metadata.get("extraction_method", "default"),
+        # Embedding information
+        "embedding_provider": embedding_provider,
+        "embedding_model": embedding_model,
     }
 
     # Add PDF-specific metadata if applicable
@@ -640,7 +653,7 @@ class GitHubToQdrantProcessor:
             model_name = self.config["sentence_transformers"]["model"]
             print(f"🤖 Using embedding provider: Sentence Transformers ({model_name})")
         else:
-            model_name = self.config["azure_openai"]["deployment_name"]
+            model_name = self.config["azure_openai"]["model"]
             print(f"🤖 Using embedding provider: Azure OpenAI ({model_name})")
 
         print(f"📏 Embedding dimension: {self.config['qdrant']['vector_size']}")
@@ -743,7 +756,7 @@ class GitHubToQdrantProcessor:
             embeddings_params = {
                 "azure_endpoint": azure_config["endpoint"],
                 "api_key": azure_config["api_key"],
-                "azure_deployment": azure_config["deployment_name"],
+                "azure_deployment": azure_config["model"],
                 "api_version": azure_config["api_version"],
             }
 
@@ -1761,11 +1774,11 @@ class GitHubToQdrantProcessor:
                 document = Document(
                     page_content=file_content,
                     metadata={
-                        "source": relative_path,
+                        "source": self.config["github"].get("repository_url", ""),
                         "file_path": relative_path,
                         "repository": repo_name,
                         "name": self.config["github"].get("name", ""),
-                        "url": self.config["github"].get("repository_url", ""),
+                        "url": "",
                         "branch": self.config["github"].get("branch", "main"),
                         "document_type": self._get_document_type(file_path),
                         "file_size": os.path.getsize(file_path),
@@ -2077,8 +2090,10 @@ class GitHubToQdrantProcessor:
         document = Document(
             page_content=combined_content,
             metadata={
-                "source": "github_repository",
+                "source": self.config["github"].get("repository_url", ""),
                 "repository": repo_name,
+                "name": self.config["github"].get("name", ""),
+                "url": "",
                 "branch": branch,
                 "document_type": "combined_text",
                 "processed_at": datetime.now().isoformat(),
@@ -2299,8 +2314,10 @@ class GitHubToQdrantProcessor:
         document = Document(
             page_content=combined_content,
             metadata={
-                "source": "github_repository",
+                "source": self.config["github"].get("repository_url", ""),
                 "repository": repo_name,
+                "name": self.config["github"].get("name", ""),
+                "url": "",
                 "branch": self.config["github"].get("branch", "default"),
             },
         )
@@ -2562,6 +2579,7 @@ def load_repository_list(repo_list_path: str) -> List[RepositoryConfig]:
             url=repo["url"],
             branch=repo.get("branch"),
             collection_name=repo["collection_name"],
+            name=repo.get("name"),
         )
         configs.append(config)
 

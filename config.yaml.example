@@ -25,7 +25,7 @@ embedding_provider: mistral_ai
 azure_openai:
   api_key: ${AZURE_OPENAI_API_KEY}
   endpoint: ${AZURE_OPENAI_ENDPOINT}
-  deployment_name: text-embedding-3-large  # or text-embedding-ada-002, text-embedding-3-small
+  model: text-embedding-3-large  # or text-embedding-ada-002, text-embedding-3-small
   api_version: "2024-02-01"
   dimensions: 3072  # Output vector dimensions (supports dimension reduction)
                     # text-embedding-3-large: native 3072, can reduce to 1536, 1024, 512, etc.
