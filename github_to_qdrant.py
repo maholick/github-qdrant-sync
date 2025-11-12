@@ -282,7 +282,9 @@ def create_payload(
     elif embedding_provider == "mistral_ai":
         embedding_model = config.get("mistral_ai", {}).get("model", "unknown")
     elif embedding_provider == "sentence_transformers":
-        embedding_model = config.get("sentence_transformers", {}).get("model", "unknown")
+        embedding_model = config.get("sentence_transformers", {}).get(
+            "model", "unknown"
+        )
 
     # Build metadata dictionary
     metadata_dict = {
