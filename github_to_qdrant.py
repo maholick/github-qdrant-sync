@@ -240,13 +240,18 @@ def create_payload(
     repo_name: str,
     file_path: str,
 ) -> Dict[str, Any]:
-    """Create optimized payload with configurable content fields."""
+    """
+    Create optimized payload with configurable content fields and metadata structure.
+
+    Supports both nested (LangChain default) and flat (v0.3.2) metadata structures.
+    """
 
     # Get content field configuration
     payload_config = config.get("payload", {})
     content_fields = payload_config.get("content_fields", ["content", "page_content"])
     preview_length = payload_config.get("preview_length", 200)
     minimal_mode = payload_config.get("minimal_mode", False)
+    metadata_structure = payload_config.get("metadata_structure", "nested")
 
     # Apply minimal mode if enabled
     if minimal_mode and len(content_fields) > 2:
@@ -262,50 +267,58 @@ def create_payload(
         else:
             preview = preview + "..."
 
-    # Build payload with configurable content fields
+    # Build payload with configurable content fields (always at root level)
     payload = {}
 
     # Add content to all configured fields
     for field_name in content_fields:
         payload[field_name] = chunk.page_content
 
-    # Add flattened metadata (no nesting)
-    payload.update(
-        {
-            # Identifiers
-            "doc_id": f"{repo_name}_{os.path.basename(file_path)}_{chunk_index}",
-            "chunk_id": chunk_index,
-            # Source information
-            "source": chunk.metadata.get("source", file_path),
-            "source_type": detect_source_type(file_path),
-            "repository": chunk.metadata.get("repository", repo_name),
-            "branch": chunk.metadata.get("branch", "main"),
-            # Content metrics
-            "preview": preview,
-            "chunk_size": len(chunk.page_content),
-            "token_count": len(chunk.page_content.split()),
-            "quality_score": calculate_quality_score(chunk),
-            # Processing metadata
-            "timestamp": int(datetime.now().timestamp()),
-            "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
-            "extraction_method": chunk.metadata.get("extraction_method", "default"),
-        }
-    )
+    # Build metadata dictionary
+    metadata_dict = {
+        # Identifiers
+        "doc_id": f"{repo_name}_{os.path.basename(file_path)}_{chunk_index}",
+        "chunk_id": chunk_index,
+        # Source information
+        "source": chunk.metadata.get("source", file_path),
+        "source_type": detect_source_type(file_path),
+        "repository": chunk.metadata.get("repository", repo_name),
+        "name": chunk.metadata.get("name", ""),
+        "url": chunk.metadata.get("url", ""),
+        "branch": chunk.metadata.get("branch", "main"),
+        # Content metrics
+        "preview": preview,
+        "chunk_size": len(chunk.page_content),
+        "token_count": len(chunk.page_content.split()),
+        "quality_score": calculate_quality_score(chunk),
+        # Processing metadata
+        "timestamp": int(datetime.now().timestamp()),
+        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
+        "extraction_method": chunk.metadata.get("extraction_method", "default"),
+    }
 
     # Add PDF-specific metadata if applicable
     if chunk.metadata.get("page"):
-        payload["page_number"] = chunk.metadata.get("page")
-        payload["total_pages"] = chunk.metadata.get("total_pages")
+        metadata_dict["page_number"] = chunk.metadata.get("page")
+        metadata_dict["total_pages"] = chunk.metadata.get("total_pages")
 
     # Add any additional metadata that's not already included
     for key, value in chunk.metadata.items():
-        if key not in payload and key not in [
+        if key not in metadata_dict and key not in [
             "page_content",
             "content",
             "text",
             "document",
         ]:
-            payload[key] = value
+            metadata_dict[key] = value
+
+    # Apply metadata structure: nested (LangChain) or flat
+    if metadata_structure == "nested":
+        # Nested structure: metadata under "metadata" key (LangChain default)
+        payload["metadata"] = metadata_dict
+    else:
+        # Flat structure: all fields at root level (v0.3.2 behavior)
+        payload.update(metadata_dict)
 
     return payload
 
@@ -317,6 +330,7 @@ class RepositoryConfig:
     url: str
     branch: Optional[str] = None
     collection_name: Optional[str] = None
+    name: Optional[str] = None
 
 
 @dataclass
@@ -444,7 +458,7 @@ class MistralEmbeddingClient:
     """
 
     def __init__(
-        self, api_key: str, model: str = "codestral-embed", output_dimension: int = 1536
+        self, api_key: str, model: str = "codestral-embed", dimensions: int = 1536
     ):
         """
         Initialize Mistral AI embedding client.
@@ -452,7 +466,7 @@ class MistralEmbeddingClient:
         Args:
             api_key: Mistral AI API key for authentication
             model: Embedding model name (mistral-embed, codestral-embed)
-            output_dimension: Vector dimension for codestral-embed (ignored for mistral-embed)
+            dimensions: Output vector dimensions for codestral-embed (ignored for mistral-embed)
         """
         if not MISTRAL_AVAILABLE or Mistral is None:
             raise ImportError(
@@ -461,15 +475,15 @@ class MistralEmbeddingClient:
 
         self.client = Mistral(api_key=api_key)
         self.model = model
-        self.output_dimension = output_dimension if model == "codestral-embed" else None
+        self.dimensions = dimensions if model == "codestral-embed" else None
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for a list of documents."""
         try:
             # Prepare parameters
             params = {"model": self.model, "inputs": texts}
-            if self.output_dimension and self.model == "codestral-embed":
-                params["output_dimension"] = self.output_dimension
+            if self.dimensions and self.model == "codestral-embed":
+                params["output_dimension"] = self.dimensions
 
             response = self.client.embeddings.create(**params)
             return [
@@ -496,13 +510,18 @@ class SentenceTransformerClient:
     consistent embed_documents() and embed_query() methods.
     """
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        dimensions: Optional[int] = None,
+    ):
         """
         Initialize Sentence Transformers embedding client.
 
         Args:
             model_name: Model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2',
                        'intfloat/multilingual-e5-large')
+            dimensions: Optional expected dimensions (for validation). Auto-detected from model if not specified.
         """
         if not SENTENCE_TRANSFORMERS_AVAILABLE or SentenceTransformer is None:
             raise ImportError(
@@ -512,8 +531,16 @@ class SentenceTransformerClient:
         self.model_name = model_name
         self.model = SentenceTransformer(model_name)
 
-        # Get embedding dimension
+        # Get embedding dimension from model
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
+        self.dimensions = dimensions or self.embedding_dim
+
+        # Validate if dimensions were specified
+        if dimensions and dimensions != self.embedding_dim:
+            logging.warning(
+                f"Specified dimensions ({dimensions}) doesn't match model's native dimensions ({self.embedding_dim}). Using model's native dimensions."
+            )
+            self.dimensions = self.embedding_dim
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for a list of documents."""
@@ -702,20 +729,29 @@ class GitHubToQdrantProcessor:
             return MistralEmbeddingClient(
                 api_key=mistral_config["api_key"],
                 model=mistral_config["model"],
-                output_dimension=mistral_config.get("output_dimension", 1536),
+                dimensions=mistral_config.get("dimensions", 1536),
             )
         elif provider == "sentence_transformers":
             st_config = self.config["sentence_transformers"]
-            return SentenceTransformerClient(model_name=st_config["model"])
+            return SentenceTransformerClient(
+                model_name=st_config["model"],
+                dimensions=st_config.get("dimensions"),
+            )
         else:
             # Default to Azure OpenAI
             azure_config = self.config["azure_openai"]
-            return AzureOpenAIEmbeddings(
-                azure_endpoint=azure_config["endpoint"],
-                api_key=azure_config["api_key"],
-                azure_deployment=azure_config["deployment_name"],
-                api_version=azure_config["api_version"],
-            )
+            embeddings_params = {
+                "azure_endpoint": azure_config["endpoint"],
+                "api_key": azure_config["api_key"],
+                "azure_deployment": azure_config["deployment_name"],
+                "api_version": azure_config["api_version"],
+            }
+
+            # Add dimensions parameter if specified (for dimension reduction)
+            if "dimensions" in azure_config:
+                embeddings_params["dimensions"] = azure_config["dimensions"]
+
+            return AzureOpenAIEmbeddings(**embeddings_params)
 
     def _initialize_qdrant(self) -> QdrantClient:
         """
@@ -1728,6 +1764,8 @@ class GitHubToQdrantProcessor:
                         "source": relative_path,
                         "file_path": relative_path,
                         "repository": repo_name,
+                        "name": self.config["github"].get("name", ""),
+                        "url": self.config["github"].get("repository_url", ""),
                         "branch": self.config["github"].get("branch", "main"),
                         "document_type": self._get_document_type(file_path),
                         "file_size": os.path.getsize(file_path),
@@ -2281,14 +2319,16 @@ class GitHubToQdrantProcessor:
         repo_url: str,
         branch: Optional[str] = None,
         collection_name: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> ProcessingResult:
         """
-        Process a repository with optional overrides for branch and collection.
+        Process a repository with optional overrides for branch, collection, and name.
 
         Args:
             repo_url: GitHub repository URL
             branch: Optional branch override
             collection_name: Optional collection name override
+            name: Optional human-readable repository name
 
         Returns:
             ProcessingResult with status and statistics
@@ -2303,12 +2343,19 @@ class GitHubToQdrantProcessor:
         # Temporarily override config values if provided
         original_branch = self.config["github"].get("branch")
         original_collection = self.config["qdrant"]["collection_name"]
+        original_name = self.config["github"].get("name")
+        original_url = self.config["github"].get("repository_url")
 
         try:
+            # Always set the repository_url for metadata
+            self.config["github"]["repository_url"] = repo_url
+
             if branch:
                 self.config["github"]["branch"] = branch
             if collection_name:
                 self.config["qdrant"]["collection_name"] = collection_name
+            if name:
+                self.config["github"]["name"] = name
 
             # Process the repository
             files_processed, chunks_created = self._process_repository_internal(
@@ -2333,6 +2380,17 @@ class GitHubToQdrantProcessor:
                 self.config["github"]["branch"] = original_branch
             elif "branch" in self.config["github"]:
                 del self.config["github"]["branch"]
+
+            if original_name:
+                self.config["github"]["name"] = original_name
+            elif "name" in self.config["github"]:
+                del self.config["github"]["name"]
+
+            if original_url:
+                self.config["github"]["repository_url"] = original_url
+            elif "repository_url" in self.config["github"]:
+                del self.config["github"]["repository_url"]
+
             self.config["qdrant"]["collection_name"] = original_collection
 
         return result
@@ -2538,6 +2596,8 @@ def process_repository_list(
         print("\n" + "=" * 60)
         print(f"Processing repository {i}/{len(repositories)}")
         print(f"Repository: {repo_config.url}")
+        if repo_config.name:
+            print(f"Name: {repo_config.name}")
         print(f"Branch: {repo_config.branch or 'default'}")
         print(f"Collection: {repo_config.collection_name}")
         print("=" * 60)
@@ -2547,6 +2607,7 @@ def process_repository_list(
                 repo_url=repo_config.url,
                 branch=repo_config.branch,
                 collection_name=repo_config.collection_name,
+                name=repo_config.name,
             )
             results.append(result)
             print(f"✅ Successfully processed: {repo_config.url}")

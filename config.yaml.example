@@ -8,6 +8,7 @@
 github:
   repository_url: https://github.com/your-org/your-repo.git
   branch: main
+  name: ""  # Optional: Human-readable name (e.g., "User Documentation")
   clone_depth: 1
   cleanup_after_processing: true
   token: ${GITHUB_TOKEN}  # Optional: for private repos
@@ -24,8 +25,12 @@ embedding_provider: mistral_ai
 azure_openai:
   api_key: ${AZURE_OPENAI_API_KEY}
   endpoint: ${AZURE_OPENAI_ENDPOINT}
-  deployment_name: text-embedding-3-large  # or text-embedding-ada-002
+  deployment_name: text-embedding-3-large  # or text-embedding-ada-002, text-embedding-3-small
   api_version: "2024-02-01"
+  dimensions: 3072  # Output vector dimensions (supports dimension reduction)
+                    # text-embedding-3-large: native 3072, can reduce to 1536, 1024, 512, etc.
+                    # text-embedding-3-small: native 1536, can reduce to 512, 256, etc.
+                    # text-embedding-ada-002: fixed 1536 (no reduction)
 
 # ============================================================
 # Mistral AI Configuration
@@ -33,7 +38,9 @@ azure_openai:
 mistral_ai:
   api_key: ${MISTRAL_API_KEY}
   model: codestral-embed  # or mistral-embed
-  output_dimension: 1536  # 1536 for codestral, 1024 for mistral-embed
+  dimensions: 3072  # Output vector dimensions
+                    # codestral-embed: max 3072
+                    # mistral-embed: fixed 1024
   api_base: https://api.mistral.ai/v1
 
 # ============================================================
@@ -44,7 +51,7 @@ sentence_transformers:
   # - sentence-transformers/all-MiniLM-L6-v2 (384 dimensions)
   # - intfloat/multilingual-e5-large (1024 dimensions)
   model: intfloat/multilingual-e5-large
-  vector_size: 1024
+  dimensions: 1024  # Auto-detected from model, but can be overridden
 
 # ============================================================
 # Qdrant Vector Database Configuration
@@ -143,7 +150,21 @@ processing:
     - "*.min.js"
     - "*.min.css"
     - vendor
-  
+
+  # File processing mode (NEW in v0.3.3)
+  # Controls how repository files are processed and stored:
+  # - false: Process files individually (RECOMMENDED)
+  #   * Maintains document boundaries for better context
+  #   * Deterministic vector IDs prevent duplicates on re-runs
+  #   * Better search quality and relevance per document
+  #   * Proper source attribution for each file
+  #   * Ideal for RAG applications and semantic search
+  # - true: Combine all files (legacy mode)
+  #   * Creates single large combined document
+  #   * May lose file-level context and boundaries
+  #   * Use only for compatibility with pre-v0.3.3 setups
+  combine_documents: false
+
   # Deduplication settings
   deduplication_enabled: true
   similarity_threshold: 0.95  # 0.9-0.98 recommended
@@ -215,6 +236,12 @@ payload:
 
   # Optional: Only include specified fields (reduces payload size)
   minimal_mode: false  # If true, only includes first 2 content fields
+
+  # Metadata structure (NEW in v0.3.4)
+  # Options: "nested" (LangChain default) or "flat" (v0.3.2 behavior)
+  # - nested: All metadata fields grouped under "metadata" key (recommended for LangChain compatibility)
+  # - flat: All fields at root level (better for direct Qdrant filtering)
+  metadata_structure: "nested"
 
 # ============================================================
 # Logging Configuration
