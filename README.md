@@ -710,6 +710,20 @@ echo "Vector database updated successfully"
 
 ## 📝 Changelog
 
+### v0.4.0 (2025-12-17) - Retrieval, Indexing & Robust Incremental Sync
+- ✨ **Retrieval CLI**: Added `rag_retrieval.py` for querying Qdrant collections
+- ✨ **Grouping by File**: Optionally cap/interleave results per file for better context diversity
+- ✨ **Token-aware Chunking**: Optional `token_recursive` chunking strategy using `tiktoken`
+- ✨ **Qdrant Payload Indexes**: Optional payload index management for faster filtered queries
+- 🔁 **Robust Incremental Sync**: Dedup-safe skipping via per-file markers written after successful upload
+- 🛡️ **Shared Collection Safety**: Multi-repo/branch safe scoping with `repo_id` / `file_id` / `file_upload_id`
+- 🐛 **Track File Changes Fixes**: Safer deletes + legacy fallback handling for older collections
+
+### v0.3.4 (2025-11-12) - Metadata & Embedding Config Standardization
+- ✨ **Standardized embedding config**: Use `model` consistently across providers
+- 🐛 **Metadata field fixes**: Improved repository/name mapping and attribution fields
+- 📌 **Embedding tracking**: Persist `embedding_provider` and `embedding_model` in metadata
+
 ### v0.3.3 (2025-09-16) - Individual File Processing & Deduplication
 - ✨ **Individual File Processing**: Process files separately for better context preservation
 - ✨ **Deterministic ID Generation**: Fixed duplicate vector creation on repeated runs
