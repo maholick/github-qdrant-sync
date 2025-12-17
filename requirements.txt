@@ -1,26 +1,30 @@
-langchain>=0.1.0
-langchain-openai>=0.1.0
-langchain-community>=0.1.0
-langchain-experimental>=0.0.47
-qdrant-client>=1.7.0
-openai>=1.0.0
-tiktoken>=0.5.0
-numpy>=1.24.0
-python-dotenv>=1.0.0
-pyyaml>=6.0.0
+langchain>=1.2.0
+langchain-openai>=1.1.3
+langchain-community>=0.4.1
+langchain-experimental>=0.4.1
+langchain-core>=1.2.1
+langchain-text-splitters>=1.1.0
+qdrant-client>=1.16.2
+openai>=2.13.0
+tiktoken>=0.12.0
+numpy>=2.3.5
+python-dotenv>=1.2.1
+pyyaml>=6.0.3
 
 # For Mistral AI embeddings and OCR support
-mistralai>=0.4.0
+mistralai>=1.9.11
 
 # For local embeddings support (optional)
-sentence-transformers>=2.0.0
+sentence-transformers>=5.2.0
 
 # For PDF processing
-pymupdf>=1.24.0  # Fast PDF extraction (PyMuPDF/fitz)
-pypdf>=3.17.0    # Alternative PDF extraction
+pymupdf>=1.26.7  # Fast PDF extraction (PyMuPDF/fitz)
+pypdf>=6.4.2    # Alternative PDF extraction
 
 # For image extraction from PDFs (Mistral Vision API used for processing)
 # Pillow>=10.0.0   # Not needed since we use Mistral API
 
 # For code formatting and linting
-ruff>=0.1.0
+ruff>=0.14.9
+pylint>=4.0.4
+isort>=7.0.0
