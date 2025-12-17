@@ -311,7 +311,9 @@ def create_payload(
         "processed_at": datetime.now().isoformat(),
         # Chunk hash (SHA-256). Keep short display hash for readability.
         "content_hash": hashlib.sha256(chunk.page_content.encode("utf-8")).hexdigest(),
-        "content_hash_short": hashlib.sha256(chunk.page_content.encode("utf-8")).hexdigest()[:12],
+        "content_hash_short": hashlib.sha256(
+            chunk.page_content.encode("utf-8")
+        ).hexdigest()[:12],
         "extraction_method": chunk.metadata.get("extraction_method", "default"),
         # Embedding information
         "embedding_provider": embedding_provider,
@@ -704,8 +706,8 @@ class GitHubToQdrantProcessor:
             print("📝 Semantic text splitter configured with percentile threshold")
         elif chunking_strategy in ("token_recursive", "token"):
             # Token-aware recursive splitter (uses tiktoken length function)
-            encoding_name = (
-                self.config.get("processing", {}).get("tiktoken_encoding", "cl100k_base")
+            encoding_name = self.config.get("processing", {}).get(
+                "tiktoken_encoding", "cl100k_base"
             )
             try:
                 encoding = tiktoken.get_encoding(encoding_name)
@@ -1801,7 +1803,9 @@ class GitHubToQdrantProcessor:
                 existing_schema = dict(info.payload_schema)
         except Exception as e:
             # Non-fatal; we'll fall back to attempting create calls below.
-            self.logger.debug("Could not read payload schema for '%s': %s", collection_name, e)
+            self.logger.debug(
+                "Could not read payload schema for '%s': %s", collection_name, e
+            )
 
         for spec in fields:
             if not isinstance(spec, dict):
@@ -1889,8 +1893,12 @@ class GitHubToQdrantProcessor:
             try:
                 repo_url = self.config["github"].get("repository_url", "")
                 branch_name = self.config["github"].get("branch", "main")
-                repo_id = hashlib.sha256(f"{repo_url}@{branch_name}".encode("utf-8")).hexdigest()
-                file_id = hashlib.sha256(f"{repo_id}:{relative_path}".encode("utf-8")).hexdigest()
+                repo_id = hashlib.sha256(
+                    f"{repo_url}@{branch_name}".encode("utf-8")
+                ).hexdigest()
+                file_id = hashlib.sha256(
+                    f"{repo_id}:{relative_path}".encode("utf-8")
+                ).hexdigest()
 
                 # Read file content
                 if file_path.lower().endswith(".pdf") and pdf_processor:
@@ -1913,8 +1921,12 @@ class GitHubToQdrantProcessor:
                     continue
 
                 # File hash + upload id (SHA-256) used for incremental sync
-                track_changes = self.config["processing"].get("track_file_changes", False)
-                file_hash = self._calculate_file_hash(file_path) if track_changes else ""
+                track_changes = self.config["processing"].get(
+                    "track_file_changes", False
+                )
+                file_hash = (
+                    self._calculate_file_hash(file_path) if track_changes else ""
+                )
                 file_upload_id = (
                     hashlib.sha256(f"{file_id}:{file_hash}".encode("utf-8")).hexdigest()
                     if track_changes
@@ -2043,7 +2055,9 @@ class GitHubToQdrantProcessor:
 
     def _payload_field(self, name: str) -> str:
         """Map a logical metadata field name to the configured payload layout."""
-        metadata_structure = self.config.get("payload", {}).get("metadata_structure", "nested")
+        metadata_structure = self.config.get("payload", {}).get(
+            "metadata_structure", "nested"
+        )
         return f"metadata.{name}" if metadata_structure == "nested" else name
 
     def _chunking_signature(self) -> str:
@@ -2133,7 +2147,8 @@ class GitHubToQdrantProcessor:
                     key=file_id_field, match=qdrant_models.MatchValue(value=file_id)
                 ),
                 qdrant_models.FieldCondition(
-                    key=upload_id_field, match=qdrant_models.MatchValue(value=file_upload_id)
+                    key=upload_id_field,
+                    match=qdrant_models.MatchValue(value=file_upload_id),
                 ),
             ]
         )
@@ -2255,7 +2270,9 @@ class GitHubToQdrantProcessor:
                     )
                 else:
                     points.append(
-                        PointStruct(id=str(marker_uuid), vector=zero_vector, payload=payload)
+                        PointStruct(
+                            id=str(marker_uuid), vector=zero_vector, payload=payload
+                        )
                     )
 
             # Upsert markers in a single request (cheap)
@@ -2264,7 +2281,9 @@ class GitHubToQdrantProcessor:
             # Non-fatal: markers are an optimization for incremental sync.
             self.logger.warning("Failed to upsert file markers: %s", e)
 
-    def _delete_points_for_file(self, relative_path: str, repo_id: str, file_id: str) -> None:
+    def _delete_points_for_file(
+        self, relative_path: str, repo_id: str, file_id: str
+    ) -> None:
         """Delete all points for a file, scoped by repo_id+file_id (multi-repo safe)."""
         collection_name = self.config["qdrant"]["collection_name"]
 
@@ -2286,7 +2305,8 @@ class GitHubToQdrantProcessor:
         legacy = qdrant_models.Filter(
             must=[
                 qdrant_models.FieldCondition(
-                    key=file_path_field, match=qdrant_models.MatchValue(value=relative_path)
+                    key=file_path_field,
+                    match=qdrant_models.MatchValue(value=relative_path),
                 )
             ]
         )

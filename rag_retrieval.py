@@ -81,7 +81,9 @@ def _group_by_file(
     grouped: Dict[str, List[m.ScoredPoint]] = defaultdict(list)
     for hit in hits:
         payload = hit.payload or {}
-        meta = payload.get("metadata", {}) if metadata_structure == "nested" else payload
+        meta = (
+            payload.get("metadata", {}) if metadata_structure == "nested" else payload
+        )
         file_path = meta.get("file_path") or meta.get("source") or "unknown"
         grouped[str(file_path)].append(hit)
 
@@ -177,6 +179,7 @@ def _expand_parent_window(
         with_payload=True,
         with_vectors=False,
     )
+
     # Sort by chunk index so text is ordered
     def _get_idx(p: m.Record) -> int:
         pl = p.payload or {}
@@ -196,7 +199,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to config.yaml used for ingestion")
     parser.add_argument("--query", required=True, help="Query text")
-    parser.add_argument("--limit", type=int, default=None, help="Override retrieval.top_k")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Override retrieval.top_k"
+    )
     parser.add_argument(
         "--with-parent-window",
         action="store_true",
@@ -271,8 +276,10 @@ def main() -> None:
             timeout=timeout,
             prefer_grpc=False,
         )
-    elif connection_method == "url" and isinstance(url, str) and (
-        url.startswith("https://") or url.startswith("http://")
+    elif (
+        connection_method == "url"
+        and isinstance(url, str)
+        and (url.startswith("https://") or url.startswith("http://"))
     ):
         client = QdrantClient(url=url, api_key=api_key, timeout=timeout)
     else:
@@ -326,5 +333,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
