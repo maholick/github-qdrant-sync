@@ -70,6 +70,41 @@ qdrant:
   connection_method: auto
   timeout: 30
 
+  # Payload indexing (optional, recommended for large collections)
+  #
+  # This creates Qdrant payload indexes for faster filtered search / grouping.
+  # Works with both payload layouts:
+  # - payload.metadata_structure: nested -> indexes use paths like "metadata.repository"
+  # - payload.metadata_structure: flat   -> indexes use paths like "repository"
+  payload_indexes:
+    enabled: false
+    apply_to_existing_collections: true
+    fields:
+      - name: repo_id
+        type: keyword
+      - name: file_id
+        type: keyword
+      - name: file_upload_id
+        type: keyword
+      - name: repository
+        type: keyword
+      - name: source
+        type: keyword
+      - name: source_type
+        type: keyword
+      - name: extraction_method
+        type: keyword
+      - name: content_hash
+        type: keyword
+      - name: file_hash
+        type: keyword
+      - name: embedding_provider
+        type: keyword
+      - name: embedding_model
+        type: keyword
+      - name: page_number
+        type: integer
+
 # ============================================================
 # Document Processing Configuration
 # ============================================================
@@ -80,7 +115,13 @@ processing:
   # Text chunking configuration
   chunk_size: 1000  # Characters per chunk (500-2000 recommended)
   chunk_overlap: 200  # Overlap for context continuity
-  chunking_strategy: recursive  # Options: recursive (default), semantic
+  chunking_strategy: recursive  # Options: recursive (default), token_recursive, semantic
+
+  # Token-aware chunking (recommended for stable chunk sizes across models)
+  # Only used when chunking_strategy is token_recursive (or token).
+  chunk_size_tokens: 512
+  chunk_overlap_tokens: 64
+  tiktoken_encoding: cl100k_base
   
   # Markdown-specific extensions
   markdown_extensions:
@@ -236,6 +277,31 @@ payload:
 
   # Optional: Only include specified fields (reduces payload size)
   minimal_mode: false  # If true, only includes first 2 content fields
+
+  # Optional: control which keys from chunk.metadata are copied into payload metadata.
+  # If metadata_allowlist is set, only those keys will be copied (in addition to core fields).
+  # Keys in metadata_denylist are never copied.
+  # This helps keep the payload schema stable across runs.
+  # metadata_allowlist:
+  #   - file_path
+  #   - file_hash
+  metadata_denylist:
+    - page_content
+    - content
+    - text
+    - document
+
+# ============================================================
+# Retrieval (optional CLI helper)
+# ============================================================
+retrieval:
+  top_k: 10
+  fetch_k: 40
+  max_chunks_per_file: 3
+  parent_window: 2
+  # Optional filters by metadata fields (use logical names; code will map to metadata.<field> if nested)
+  # filters:
+  #   repository: your-repo-name
 
   # Metadata structure (NEW in v0.3.4)
   # Options: "nested" (LangChain default) or "flat" (v0.3.2 behavior)

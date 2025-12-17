@@ -33,6 +33,8 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import AzureOpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.http import models as qdrant_models
+import tiktoken
 
 # Import PDF processor
 from pdf_processor import PDFProcessor
@@ -252,6 +254,8 @@ def create_payload(
     preview_length = payload_config.get("preview_length", 200)
     minimal_mode = payload_config.get("minimal_mode", False)
     metadata_structure = payload_config.get("metadata_structure", "nested")
+    metadata_allowlist = payload_config.get("metadata_allowlist")
+    metadata_denylist = payload_config.get("metadata_denylist", [])
 
     # Apply minimal mode if enabled
     if minimal_mode and len(content_fields) > 2:
@@ -305,7 +309,9 @@ def create_payload(
         "quality_score": calculate_quality_score(chunk),
         # Processing metadata
         "processed_at": datetime.now().isoformat(),
-        "content_hash": hashlib.md5(chunk.page_content.encode()).hexdigest()[:8],
+        # Chunk hash (SHA-256). Keep short display hash for readability.
+        "content_hash": hashlib.sha256(chunk.page_content.encode("utf-8")).hexdigest(),
+        "content_hash_short": hashlib.sha256(chunk.page_content.encode("utf-8")).hexdigest()[:12],
         "extraction_method": chunk.metadata.get("extraction_method", "default"),
         # Embedding information
         "embedding_provider": embedding_provider,
@@ -319,13 +325,23 @@ def create_payload(
 
     # Add any additional metadata that's not already included
     for key, value in chunk.metadata.items():
-        if key not in metadata_dict and key not in [
+        if key in metadata_dict:
+            continue
+        if key in [
             "page_content",
             "content",
             "text",
             "document",
         ]:
-            metadata_dict[key] = value
+            continue
+
+        # Optional schema control
+        if isinstance(metadata_allowlist, list) and key not in metadata_allowlist:
+            continue
+        if isinstance(metadata_denylist, list) and key in metadata_denylist:
+            continue
+
+        metadata_dict[key] = value
 
     # Apply metadata structure: nested (LangChain) or flat
     if metadata_structure == "nested":
@@ -686,6 +702,33 @@ class GitHubToQdrantProcessor:
                 breakpoint_threshold_amount=95,  # 95th percentile for semantic similarity
             )
             print("📝 Semantic text splitter configured with percentile threshold")
+        elif chunking_strategy in ("token_recursive", "token"):
+            # Token-aware recursive splitter (uses tiktoken length function)
+            encoding_name = (
+                self.config.get("processing", {}).get("tiktoken_encoding", "cl100k_base")
+            )
+            try:
+                encoding = tiktoken.get_encoding(encoding_name)
+            except Exception:
+                # Fallback to cl100k_base if unknown encoding provided
+                encoding = tiktoken.get_encoding("cl100k_base")
+
+            chunk_size_tokens = self.config["processing"].get(
+                "chunk_size_tokens", self.config["processing"]["chunk_size"]
+            )
+            chunk_overlap_tokens = self.config["processing"].get(
+                "chunk_overlap_tokens", self.config["processing"]["chunk_overlap"]
+            )
+
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size_tokens,
+                chunk_overlap=chunk_overlap_tokens,
+                separators=["\n## ", "\n### ", "\n#### ", "\n\n", "\n", " ", ""],
+                length_function=lambda s: len(encoding.encode(s)),
+            )
+            print(
+                f"📝 Token-aware text splitter configured: {chunk_size_tokens} tokens/chunk with {chunk_overlap_tokens} overlap (encoding: {encoding_name})"
+            )
         else:
             # Default to recursive character text splitter
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -1706,8 +1749,102 @@ class GitHubToQdrantProcessor:
                     ),
                 )
             print(f"✅ Collection '{collection_name}' created successfully")
+            # Optional: Create payload indexes for faster filtered queries
+            self._ensure_qdrant_payload_indexes(collection_name=collection_name)
         else:
             print(f"📚 Using existing collection: {collection_name}")
+            # Optional: Create payload indexes for faster filtered queries
+            if (
+                self.config.get("qdrant", {})
+                .get("payload_indexes", {})
+                .get("apply_to_existing_collections", True)
+            ):
+                self._ensure_qdrant_payload_indexes(collection_name=collection_name)
+
+    def _ensure_qdrant_payload_indexes(self, collection_name: str) -> None:
+        """
+        Ensure configured Qdrant payload indexes exist (idempotent).
+
+        Supports both payload layouts depending on `payload.metadata_structure`:
+        - nested: fields are under `metadata.*` (e.g. `metadata.repository`)
+        - flat: fields are at root (e.g. `repository`)
+        """
+        qdrant_cfg = self.config.get("qdrant", {})
+        idx_cfg = qdrant_cfg.get("payload_indexes", {})
+        if not idx_cfg.get("enabled", False):
+            return
+
+        payload_cfg = self.config.get("payload", {})
+        metadata_structure = payload_cfg.get("metadata_structure", "nested")
+
+        fields = idx_cfg.get("fields", [])
+        if not isinstance(fields, list) or not fields:
+            return
+
+        type_map: Dict[str, qdrant_models.PayloadSchemaType] = {
+            "keyword": qdrant_models.PayloadSchemaType.KEYWORD,
+            "integer": qdrant_models.PayloadSchemaType.INTEGER,
+            "float": qdrant_models.PayloadSchemaType.FLOAT,
+            "bool": qdrant_models.PayloadSchemaType.BOOL,
+            "datetime": qdrant_models.PayloadSchemaType.DATETIME,
+            "text": qdrant_models.PayloadSchemaType.TEXT,
+            "uuid": qdrant_models.PayloadSchemaType.UUID,
+        }
+
+        created = 0
+        # Best-effort: detect existing indexes from collection payload schema to make this
+        # truly idempotent even if the API does not error on duplicates.
+        existing_schema: Dict[str, Any] = {}
+        try:
+            info = self.qdrant_client.get_collection(collection_name=collection_name)
+            if getattr(info, "payload_schema", None):
+                existing_schema = dict(info.payload_schema)
+        except Exception as e:
+            # Non-fatal; we'll fall back to attempting create calls below.
+            self.logger.debug("Could not read payload schema for '%s': %s", collection_name, e)
+
+        for spec in fields:
+            if not isinstance(spec, dict):
+                continue
+            name = spec.get("name")
+            type_name = str(spec.get("type", "keyword")).lower()
+            if not name:
+                continue
+
+            field_path = (
+                f"metadata.{name}" if metadata_structure == "nested" else str(name)
+            )
+            if field_path in existing_schema:
+                continue
+            schema = type_map.get(type_name)
+            if schema is None:
+                self.logger.warning(
+                    "Unknown payload index type '%s' for field '%s' (skipping)",
+                    type_name,
+                    field_path,
+                )
+                continue
+
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field_path,
+                    field_schema=schema,
+                    wait=True,
+                )
+                created += 1
+                print(f"   ⚡ Created payload index: {field_path} ({type_name})")
+            except Exception as e:
+                # Idempotency: Qdrant returns an error if index already exists.
+                msg = str(e).lower()
+                if "already exists" in msg or "alreadyexists" in msg:
+                    continue
+                self.logger.warning(
+                    "Failed to create payload index for '%s': %s", field_path, e
+                )
+
+        if created:
+            print(f"✅ Payload indexing complete ({created} index(es) created)")
 
     def _process_files_individually(
         self, text_files: List[str], repo_name: str, repo_root: str
@@ -1742,16 +1879,14 @@ class GitHubToQdrantProcessor:
         for i, file_path in enumerate(text_files, 1):
             relative_path = os.path.relpath(file_path, repo_root)
 
-            # Skip if file hasn't changed (if tracking is enabled)
-            if self.config["processing"].get("track_file_changes", False):
-                file_hash = self._calculate_file_hash(file_path)
-                if self._is_file_unchanged(relative_path, file_hash):
-                    print(f"   ⏭️  Skipping unchanged file: {relative_path}")
-                    continue
-
             print(f"   📄 [{i}/{len(text_files)}] Processing: {relative_path}")
 
             try:
+                repo_url = self.config["github"].get("repository_url", "")
+                branch_name = self.config["github"].get("branch", "main")
+                repo_id = hashlib.sha256(f"{repo_url}@{branch_name}".encode("utf-8")).hexdigest()
+                file_id = hashlib.sha256(f"{repo_id}:{relative_path}".encode("utf-8")).hexdigest()
+
                 # Read file content
                 if file_path.lower().endswith(".pdf") and pdf_processor:
                     pdf_docs = pdf_processor.process_pdf(file_path)
@@ -1772,29 +1907,80 @@ class GitHubToQdrantProcessor:
                     print(f"      ⚠️  Empty file: {relative_path}")
                     continue
 
+                # File hash + upload id (SHA-256) used for incremental sync
+                track_changes = self.config["processing"].get("track_file_changes", False)
+                file_hash = self._calculate_file_hash(file_path) if track_changes else ""
+                file_upload_id = (
+                    hashlib.sha256(f"{file_id}:{file_hash}".encode("utf-8")).hexdigest()
+                    if track_changes
+                    else ""
+                )
+
                 # Create document with file-specific metadata
+                doc_metadata = {
+                    "source": self.config["github"].get("repository_url", ""),
+                    "file_path": relative_path,
+                    "repository": repo_name,
+                    "repo_id": repo_id,
+                    "file_id": file_id,
+                    "name": self.config["github"].get("name", ""),
+                    "url": "",
+                    "branch": self.config["github"].get("branch", "main"),
+                    "document_type": self._get_document_type(file_path),
+                    "file_size": os.path.getsize(file_path),
+                }
+                if track_changes:
+                    doc_metadata["file_hash"] = file_hash
+                    doc_metadata["file_upload_id"] = file_upload_id
+
                 document = Document(
                     page_content=file_content,
-                    metadata={
-                        "source": self.config["github"].get("repository_url", ""),
-                        "file_path": relative_path,
-                        "repository": repo_name,
-                        "name": self.config["github"].get("name", ""),
-                        "url": "",
-                        "branch": self.config["github"].get("branch", "main"),
-                        "document_type": self._get_document_type(file_path),
-                        "file_size": os.path.getsize(file_path),
-                    },
+                    metadata=doc_metadata,
                 )
 
                 # Split document into chunks
                 file_chunks = self.text_splitter.split_documents([document])
+                expected_total_chunks = len(file_chunks)
+
+                # Incremental sync decision after splitting (lets us validate completeness)
+                if track_changes:
+                    if self._is_file_unchanged(
+                        relative_path=relative_path,
+                        repo_id=repo_id,
+                        file_id=file_id,
+                        file_upload_id=file_upload_id,
+                        expected_total_chunks=expected_total_chunks,
+                    ):
+                        print(
+                            f"   ⏭️  Skipping unchanged file (complete): {relative_path} "
+                            f"(chunks={expected_total_chunks})"
+                        )
+                        continue
+
+                    # Remove old points for this file (repo-scoped) before re-uploading
+                    self._delete_points_for_file(
+                        relative_path=relative_path,
+                        repo_id=repo_id,
+                        file_id=file_id,
+                    )
 
                 # Add chunk-specific metadata
                 for j, chunk in enumerate(file_chunks):
                     chunk.metadata["chunk_index"] = j
                     chunk.metadata["total_chunks"] = len(file_chunks)
                     chunk.metadata["file_path"] = relative_path
+                    # Parent/child metadata for retrieval-time context expansion
+                    chunk.metadata["parent_source"] = relative_path
+                    chunk.metadata["chunk_index_within_file"] = j
+                    chunk.metadata["parent_id"] = hashlib.sha256(
+                        f"{repo_name}:{relative_path}".encode("utf-8")
+                    ).hexdigest()
+                    # Multi-repo-safe incremental IDs
+                    chunk.metadata["repo_id"] = repo_id
+                    chunk.metadata["file_id"] = file_id
+                    if track_changes:
+                        chunk.metadata["file_hash"] = file_hash
+                        chunk.metadata["file_upload_id"] = file_upload_id
 
                 all_chunks.extend(file_chunks)
                 all_file_paths.extend([relative_path] * len(file_chunks))
@@ -1820,17 +2006,113 @@ class GitHubToQdrantProcessor:
 
     def _calculate_file_hash(self, file_path: str) -> str:
         """Calculate hash of file content for change detection."""
-        hasher = hashlib.md5()
+        hasher = hashlib.sha256()
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _is_file_unchanged(self, relative_path: str, file_hash: str) -> bool:  # noqa: ARG002
-        """Check if file has changed since last processing."""
-        # TODO: Implement file hash tracking (could use a local cache file or Qdrant metadata)
-        # For now, return False to always process files
-        return False
+    def _payload_field(self, name: str) -> str:
+        """Map a logical metadata field name to the configured payload layout."""
+        metadata_structure = self.config.get("payload", {}).get("metadata_structure", "nested")
+        return f"metadata.{name}" if metadata_structure == "nested" else name
+
+    def _is_file_unchanged(
+        self,
+        relative_path: str,
+        repo_id: str,
+        file_id: str,
+        file_upload_id: str,
+        expected_total_chunks: int,
+    ) -> bool:
+        """Check if a file is unchanged AND fully uploaded (auto-repairs partial uploads)."""
+        collection_name = self.config["qdrant"]["collection_name"]
+
+        repo_id_field = self._payload_field("repo_id")
+        file_id_field = self._payload_field("file_id")
+        upload_id_field = self._payload_field("file_upload_id")
+
+        flt = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key=repo_id_field, match=qdrant_models.MatchValue(value=repo_id)
+                ),
+                qdrant_models.FieldCondition(
+                    key=file_id_field, match=qdrant_models.MatchValue(value=file_id)
+                ),
+                qdrant_models.FieldCondition(
+                    key=upload_id_field, match=qdrant_models.MatchValue(value=file_upload_id)
+                ),
+            ]
+        )
+
+        try:
+            # Count up to expected_total_chunks; if fewer exist, treat as partial -> re-upload
+            points, _ = self.qdrant_client.scroll(
+                collection_name=collection_name,
+                scroll_filter=flt,
+                limit=max(expected_total_chunks, 1),
+                with_payload=False,
+                with_vectors=False,
+            )
+            found = len(points)
+            return found >= expected_total_chunks
+        except Exception as e:
+            # Non-fatal: fall back to reprocessing if we can't confirm unchanged.
+            self.logger.debug("File-change check failed for %s: %s", relative_path, e)
+            return False
+
+    def _delete_points_for_file(self, relative_path: str, repo_id: str, file_id: str) -> None:
+        """Delete all points for a file, scoped by repo_id+file_id (multi-repo safe)."""
+        collection_name = self.config["qdrant"]["collection_name"]
+
+        repo_id_field = self._payload_field("repo_id")
+        file_id_field = self._payload_field("file_id")
+        file_path_field = self._payload_field("file_path")
+
+        scoped = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key=repo_id_field, match=qdrant_models.MatchValue(value=repo_id)
+                ),
+                qdrant_models.FieldCondition(
+                    key=file_id_field, match=qdrant_models.MatchValue(value=file_id)
+                ),
+            ]
+        )
+
+        legacy = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key=file_path_field, match=qdrant_models.MatchValue(value=relative_path)
+                )
+            ]
+        )
+
+        try:
+            # Preferred: repo-scoped delete
+            self.qdrant_client.delete(
+                collection_name=collection_name,
+                points_selector=scoped,
+                wait=True,
+            )
+        except Exception as e:
+            self.logger.warning(
+                "Failed deleting scoped points for %s (repo_id=%s): %s",
+                relative_path,
+                repo_id[:12],
+                e,
+            )
+
+        # Best-effort cleanup of legacy points that may not have repo_id/file_id
+        try:
+            self.qdrant_client.delete(
+                collection_name=collection_name,
+                points_selector=legacy,
+                wait=True,
+            )
+        except Exception:
+            pass
 
     def _get_document_type(self, file_path: str) -> str:
         """Determine document type from file extension."""
@@ -1889,6 +2171,10 @@ class GitHubToQdrantProcessor:
 
         all_embeddings = []
 
+        simulate_partial = self.config.get("processing", {}).get(
+            "simulate_partial_upload", False
+        )
+
         for i in range(0, len(all_texts), embedding_batch_size):
             batch_texts = all_texts[i : i + embedding_batch_size]
             batch_num = (i // embedding_batch_size) + 1
@@ -1926,6 +2212,12 @@ class GitHubToQdrantProcessor:
                     batch_embeddings.insert(idx, embedding)
 
             all_embeddings.extend(batch_embeddings)
+
+            # Test-only: allow simulating an interrupted run after first embedding batch.
+            if simulate_partial and batch_num == 1:
+                raise RuntimeError(
+                    "Simulated partial upload (processing.simulate_partial_upload=true)"
+                )
 
             # Delay between batches to be gentle on the API
             if i + embedding_batch_size < len(all_texts) and texts_to_generate:

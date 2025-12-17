@@ -86,12 +86,12 @@ pip install -r requirements.txt
 ```
 
 **Core Dependencies:**
-- `langchain>=0.1.0` - Document processing
-- `qdrant-client>=1.7.0` - Vector database
-- `openai>=1.0.0` - Azure OpenAI embeddings
-- `numpy>=1.24.0` - Vectorized operations
-- `mistralai>=0.4.0` - Mistral AI embeddings
-- `sentence-transformers>=2.0.0` - Local embedding models (optional)
+- `langchain` - Document processing
+- `qdrant-client` - Vector database
+- `openai` - Azure OpenAI embeddings
+- `numpy` - Vectorized operations
+- `mistralai` - Mistral AI embeddings
+- `sentence-transformers` - Local embedding models (optional)
 
 ### Virtual Environment (Recommended)
 
@@ -455,6 +455,28 @@ This project features **cutting-edge deduplication** that's **5-15x faster** tha
 ### 🏗️ Payload Structure (Updated v0.3.2)
 
 This project uses a **configurable payload structure** for maximum compatibility with n8n, LangChain, MCP, and other frameworks. Each document chunk is stored with the following structure:
+
+### ⚡ Qdrant Payload Indexes (Optional)
+
+For large collections, enabling payload indexes improves performance for filtered queries (e.g. “only PDFs”, “only a specific repository”, “only a specific file path”).
+
+- **Nested metadata (`payload.metadata_structure: nested`)**: index fields use paths like `metadata.repository`.\n
+- **Flat metadata (`payload.metadata_structure: flat`)**: index fields use paths like `repository`.\n
+
+Configure in `qdrant.payload_indexes` in `config.yaml` (see `config.yaml.example`).\n
+
+### 🔁 Incremental Sync (track_file_changes) and Shared Collections
+
+When `processing.track_file_changes: true`, the pipeline computes a **SHA-256** `file_hash` per file and uses deterministic identifiers to safely support either:\n
+- **One repo per collection**, or\n
+- **Multiple repos/branches sharing a collection**.\n
+
+Key metadata fields:\n
+- `repo_id`: SHA-256 of `repo_url@branch`\n
+- `file_id`: SHA-256 of `repo_id:file_path`\n
+- `file_upload_id`: SHA-256 of `file_id:file_hash`\n
+
+This prevents accidental cross-repo deletes when different repos contain the same `file_path`, and it enables auto-repair of partial uploads by requiring a file to be fully present (all chunks) before it can be skipped.\n
 
 ```json
 {
