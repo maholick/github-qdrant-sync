@@ -206,6 +206,13 @@ processing:
   #   * Use only for compatibility with pre-v0.3.3 setups
   combine_documents: false
 
+  # Incremental sync (optional)
+  # If enabled, the pipeline will skip fully-ingested, unchanged files based on file_hash.
+  track_file_changes: false
+  # Legacy cleanup (advanced): if you are upgrading an existing collection that predates repo_id/file_id/file_upload_id,
+  # you can temporarily enable this to delete old points by file_path. Leave disabled for shared-collection setups.
+  legacy_cleanup_delete_by_file_path: false
+
   # Deduplication settings
   deduplication_enabled: true
   similarity_threshold: 0.95  # 0.9-0.98 recommended

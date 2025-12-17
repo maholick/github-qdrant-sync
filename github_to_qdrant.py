@@ -1946,9 +1946,11 @@ class GitHubToQdrantProcessor:
                 if track_changes:
                     if self._is_file_unchanged(
                         relative_path=relative_path,
+                        repo_name=repo_name,
                         repo_id=repo_id,
                         file_id=file_id,
                         file_upload_id=file_upload_id,
+                        file_hash=file_hash,
                         expected_total_chunks=expected_total_chunks,
                     ):
                         print(
@@ -2020,9 +2022,11 @@ class GitHubToQdrantProcessor:
     def _is_file_unchanged(
         self,
         relative_path: str,
+        repo_name: str,
         repo_id: str,
         file_id: str,
         file_upload_id: str,
+        file_hash: str,
         expected_total_chunks: int,
     ) -> bool:
         """Check if a file is unchanged AND fully uploaded (auto-repairs partial uploads)."""
@@ -2031,6 +2035,9 @@ class GitHubToQdrantProcessor:
         repo_id_field = self._payload_field("repo_id")
         file_id_field = self._payload_field("file_id")
         upload_id_field = self._payload_field("file_upload_id")
+        legacy_repo_field = self._payload_field("repository")
+        legacy_path_field = self._payload_field("file_path")
+        legacy_hash_field = self._payload_field("file_hash")
 
         flt = qdrant_models.Filter(
             must=[
@@ -2056,7 +2063,34 @@ class GitHubToQdrantProcessor:
                 with_vectors=False,
             )
             found = len(points)
-            return found >= expected_total_chunks
+            if found >= expected_total_chunks:
+                return True
+
+            # Backward-compatible fallback: collections ingested before repo_id/file_id/file_upload_id existed.
+            legacy_flt = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key=legacy_repo_field,
+                        match=qdrant_models.MatchValue(value=repo_name),
+                    ),
+                    qdrant_models.FieldCondition(
+                        key=legacy_path_field,
+                        match=qdrant_models.MatchValue(value=relative_path),
+                    ),
+                    qdrant_models.FieldCondition(
+                        key=legacy_hash_field,
+                        match=qdrant_models.MatchValue(value=file_hash),
+                    ),
+                ]
+            )
+            legacy_points, _ = self.qdrant_client.scroll(
+                collection_name=collection_name,
+                scroll_filter=legacy_flt,
+                limit=max(expected_total_chunks, 1),
+                with_payload=False,
+                with_vectors=False,
+            )
+            return len(legacy_points) >= expected_total_chunks
         except Exception as e:
             # Non-fatal: fall back to reprocessing if we can't confirm unchanged.
             self.logger.debug("File-change check failed for %s: %s", relative_path, e)
@@ -2105,14 +2139,18 @@ class GitHubToQdrantProcessor:
             )
 
         # Best-effort cleanup of legacy points that may not have repo_id/file_id
-        try:
-            self.qdrant_client.delete(
-                collection_name=collection_name,
-                points_selector=legacy,
-                wait=True,
-            )
-        except Exception:
-            pass
+        legacy_cleanup = self.config.get("processing", {}).get(
+            "legacy_cleanup_delete_by_file_path", False
+        )
+        if legacy_cleanup:
+            try:
+                self.qdrant_client.delete(
+                    collection_name=collection_name,
+                    points_selector=legacy,
+                    wait=True,
+                )
+            except Exception:
+                pass
 
     def _get_document_type(self, file_path: str) -> str:
         """Determine document type from file extension."""
