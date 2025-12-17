@@ -1,0 +1,12 @@
+# Smoke-test: multiple repos sharing the same collection.
+repositories:
+  - url: https://github.com/octocat/Spoon-Knife.git
+    branch: main
+    collection_name: github-qdrant-sync-shared-collection-smoke
+    name: "Spoon-Knife"
+  - url: https://github.com/octocat/Hello-World.git
+    branch: master
+    collection_name: github-qdrant-sync-shared-collection-smoke
+    name: "Hello-World"
+
+

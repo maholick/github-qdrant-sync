@@ -1,0 +1,81 @@
+github:
+  repository_url: https://github.com/octocat/Spoon-Knife.git
+  branch: main
+  clone_depth: 1
+  cleanup_after_processing: true
+embedding_provider: sentence_transformers
+sentence_transformers:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  dimensions: 384
+qdrant:
+  url: ${QDRANT_URL}
+  api_key: ${QDRANT_API_KEY}
+  collection_name: github-qdrant-sync-shared-collection-smoke
+  vector_size: 384
+  distance: Cosine
+  vector_name: null
+  recreate_collection: true
+  connection_method: auto
+  timeout: 30
+  payload_indexes:
+    enabled: true
+    apply_to_existing_collections: true
+    fields:
+    - name: repository
+      type: keyword
+    - name: source
+      type: keyword
+    - name: source_type
+      type: keyword
+    - name: extraction_method
+      type: keyword
+    - name: content_hash
+      type: keyword
+processing:
+  file_mode: all_text
+  markdown_extensions:
+  - .md
+  - .markdown
+  - .mdown
+  - .mkd
+  exclude_patterns:
+  - .git
+  - node_modules
+  combine_documents: false
+  per_file_chunking: true
+  track_file_changes: true
+  simulate_partial_upload: false
+  chunk_size: 500
+  chunk_overlap: 50
+  chunking_strategy: recursive
+  deduplication_enabled: true
+  similarity_threshold: 0.95
+  embedding_batch_size: 32
+  max_retries: 2
+  batch_delay_seconds: 0
+  text_extensions:
+  - .md
+  - .txt
+  track_file_changes: true
+pdf_processing:
+  enabled: false
+payload:
+  metadata_structure: nested
+  content_fields:
+  - content
+  - page_content
+  preview_length: 200
+  minimal_mode: false
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+output:
+  base_directory: markdown
+  combined_filename: __combined_markdown.md
+  preserve_structure: true
+retrieval:
+  top_k: 5
+  fetch_k: 20
+  max_chunks_per_file: 2
+  parent_window: 1

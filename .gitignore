@@ -6,11 +6,15 @@ config.json
 config.yaml
 config_*.json
 config_*.yaml
+config.*.yaml
 !config.json.example
 !config.yaml.example
+!config.*.yaml.example
 repositories.yaml
 repositories_*.yaml
+repositories.*.yaml
 !repositories.yaml.example
+!repositories.*.yaml.example
 CLAUDE.md
 *.secret.json
 *.secret.yaml
