@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Protocol, Union
 from urllib.parse import urlparse
 
@@ -1405,7 +1405,7 @@ class GitHubToQdrantProcessor:
             Deterministic UUID string
         """
         # Create deterministic UUID based on content hash
-        content_hash = hashlib.md5(content.encode()).hexdigest()
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         # Create a deterministic UUID from the hash
         namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
@@ -1460,8 +1460,8 @@ class GitHubToQdrantProcessor:
         return similarities
 
     def _calculate_content_hash(self, content: str) -> str:
-        """Calculate MD5 hash of content for fast duplicate pre-filtering."""
-        return hashlib.md5(content.encode("utf-8")).hexdigest()
+        """Calculate stable content hash of content for fast duplicate pre-filtering."""
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def _remove_duplicates(
         self,
@@ -1875,6 +1875,11 @@ class GitHubToQdrantProcessor:
             pdf_processor = PDFProcessor(self.config, self.logger)
             print("   📑 PDF processing enabled")
 
+        # Track which files we actually (re)ingested so we can write "file marker" points
+        # after a successful upload. This is more reliable than counting chunks in Qdrant,
+        # because deduplication can legitimately reduce the number of stored chunks.
+        markers_to_upsert: list[dict[str, Any]] = []
+
         # Process each file
         for i, file_path in enumerate(text_files, 1):
             relative_path = os.path.relpath(file_path, repo_root)
@@ -1941,6 +1946,7 @@ class GitHubToQdrantProcessor:
                 # Split document into chunks
                 file_chunks = self.text_splitter.split_documents([document])
                 expected_total_chunks = len(file_chunks)
+                chunking_signature = self._chunking_signature()
 
                 # Incremental sync decision after splitting (lets us validate completeness)
                 if track_changes:
@@ -1952,6 +1958,7 @@ class GitHubToQdrantProcessor:
                         file_upload_id=file_upload_id,
                         file_hash=file_hash,
                         expected_total_chunks=expected_total_chunks,
+                        chunking_signature=chunking_signature,
                     ):
                         print(
                             f"   ⏭️  Skipping unchanged file (complete): {relative_path} "
@@ -1989,6 +1996,21 @@ class GitHubToQdrantProcessor:
 
                 print(f"      ✅ Created {len(file_chunks)} chunks")
 
+                if track_changes:
+                    markers_to_upsert.append(
+                        {
+                            "repo_name": repo_name,
+                            "branch": branch_name,
+                            "relative_path": relative_path,
+                            "repo_id": repo_id,
+                            "file_id": file_id,
+                            "file_upload_id": file_upload_id,
+                            "file_hash": file_hash,
+                            "expected_total_chunks": expected_total_chunks,
+                            "chunking_signature": chunking_signature,
+                        }
+                    )
+
             except Exception as e:
                 print(f"      ❌ Error processing {relative_path}: {e}")
                 continue
@@ -2003,6 +2025,11 @@ class GitHubToQdrantProcessor:
 
         # Process and upload chunks with file-aware metadata
         self._upload_chunks_with_file_metadata(all_chunks, repo_name)
+
+        # Mark processed files as "complete" for incremental sync. We only write markers after
+        # a successful upload of all chunks (so interrupted runs won't create false "complete" states).
+        if track_changes and markers_to_upsert:
+            self._upsert_file_markers(markers_to_upsert)
 
         return len(all_chunks)
 
@@ -2019,6 +2046,31 @@ class GitHubToQdrantProcessor:
         metadata_structure = self.config.get("payload", {}).get("metadata_structure", "nested")
         return f"metadata.{name}" if metadata_structure == "nested" else name
 
+    def _chunking_signature(self) -> str:
+        """Create a stable signature for chunking configuration (affects chunk boundaries/count)."""
+        processing = self.config.get("processing", {})
+        # Only include settings that change how chunks are created.
+        signature_obj = {
+            "chunking_strategy": processing.get("chunking_strategy", "recursive"),
+            "chunk_size": processing.get("chunk_size"),
+            "chunk_overlap": processing.get("chunk_overlap"),
+            "chunk_size_tokens": processing.get("chunk_size_tokens"),
+            "chunk_overlap_tokens": processing.get("chunk_overlap_tokens"),
+            "tiktoken_encoding": processing.get("tiktoken_encoding"),
+            "separators": [
+                "\n## ",
+                "\n### ",
+                "\n#### ",
+                "\n\n",
+                "\n",
+                " ",
+                "",
+            ],
+        }
+        return hashlib.sha256(
+            json.dumps(signature_obj, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
     def _is_file_unchanged(
         self,
         relative_path: str,
@@ -2028,6 +2080,7 @@ class GitHubToQdrantProcessor:
         file_upload_id: str,
         file_hash: str,
         expected_total_chunks: int,
+        chunking_signature: str,
     ) -> bool:
         """Check if a file is unchanged AND fully uploaded (auto-repairs partial uploads)."""
         collection_name = self.config["qdrant"]["collection_name"]
@@ -2035,9 +2088,41 @@ class GitHubToQdrantProcessor:
         repo_id_field = self._payload_field("repo_id")
         file_id_field = self._payload_field("file_id")
         upload_id_field = self._payload_field("file_upload_id")
+        marker_type_field = self._payload_field("record_type")
+        marker_chunking_sig_field = self._payload_field("chunking_signature")
+        marker_file_hash_field = self._payload_field("file_hash")
         legacy_repo_field = self._payload_field("repository")
         legacy_path_field = self._payload_field("file_path")
         legacy_hash_field = self._payload_field("file_hash")
+
+        # Preferred path: rely on a per-file marker written only after a successful upload.
+        # This avoids false "partial upload" detection when deduplication reduces stored chunk count.
+        marker_flt = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key=repo_id_field, match=qdrant_models.MatchValue(value=repo_id)
+                ),
+                qdrant_models.FieldCondition(
+                    key=file_id_field, match=qdrant_models.MatchValue(value=file_id)
+                ),
+                qdrant_models.FieldCondition(
+                    key=upload_id_field,
+                    match=qdrant_models.MatchValue(value=file_upload_id),
+                ),
+                qdrant_models.FieldCondition(
+                    key=marker_type_field,
+                    match=qdrant_models.MatchValue(value="file_marker"),
+                ),
+                qdrant_models.FieldCondition(
+                    key=marker_chunking_sig_field,
+                    match=qdrant_models.MatchValue(value=chunking_signature),
+                ),
+                qdrant_models.FieldCondition(
+                    key=marker_file_hash_field,
+                    match=qdrant_models.MatchValue(value=file_hash),
+                ),
+            ]
+        )
 
         flt = qdrant_models.Filter(
             must=[
@@ -2054,6 +2139,17 @@ class GitHubToQdrantProcessor:
         )
 
         try:
+            # Marker check (fast and reliable)
+            marker_points, _ = self.qdrant_client.scroll(
+                collection_name=collection_name,
+                scroll_filter=marker_flt,
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if marker_points:
+                return True
+
             # Count up to expected_total_chunks; if fewer exist, treat as partial -> re-upload
             points, _ = self.qdrant_client.scroll(
                 collection_name=collection_name,
@@ -2095,6 +2191,78 @@ class GitHubToQdrantProcessor:
             # Non-fatal: fall back to reprocessing if we can't confirm unchanged.
             self.logger.debug("File-change check failed for %s: %s", relative_path, e)
             return False
+
+    def _upsert_file_markers(self, markers: list[dict[str, Any]]) -> None:
+        """Upsert per-file marker points used for robust incremental sync."""
+        if not markers:
+            return
+
+        if not self.qdrant_client:
+            return
+
+        try:
+            collection_name = self.config["qdrant"]["collection_name"]
+            vector_size = int(self.config["qdrant"]["vector_size"])
+            zero_vector = [0.0] * vector_size
+
+            vector_name = self.config["qdrant"].get("vector_name")
+            metadata_structure = self.config.get("payload", {}).get(
+                "metadata_structure", "nested"
+            )
+
+            # Qdrant point IDs must be UUID or unsigned int.
+            namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
+
+            points: list[PointStruct] = []
+            for m in markers:
+                marker_uuid = uuid.uuid5(
+                    namespace,
+                    f"file_marker:{m['file_upload_id']}:{m['chunking_signature']}",
+                )
+
+                marker_metadata = {
+                    "record_type": "file_marker",
+                    "repository": m["repo_name"],
+                    "branch": m.get("branch", ""),
+                    "file_path": m["relative_path"],
+                    "repo_id": m["repo_id"],
+                    "file_id": m["file_id"],
+                    "file_upload_id": m["file_upload_id"],
+                    "file_hash": m["file_hash"],
+                    "expected_total_chunks": int(m.get("expected_total_chunks", 0)),
+                    "chunking_signature": m["chunking_signature"],
+                    "marked_at": datetime.now(timezone.utc).isoformat(),
+                }
+
+                # Match the same payload schema as chunks (nested vs flat)
+                payload: dict[str, Any] = {
+                    # keep empty content fields so downstream tooling that expects them won't break
+                    "content": "",
+                    "page_content": "",
+                }
+                if metadata_structure == "nested":
+                    payload["metadata"] = marker_metadata
+                else:
+                    payload.update(marker_metadata)
+
+                if vector_name:
+                    points.append(
+                        PointStruct(
+                            id=str(marker_uuid),
+                            vector={vector_name: zero_vector},
+                            payload=payload,
+                        )
+                    )
+                else:
+                    points.append(
+                        PointStruct(id=str(marker_uuid), vector=zero_vector, payload=payload)
+                    )
+
+            # Upsert markers in a single request (cheap)
+            self.qdrant_client.upsert(collection_name=collection_name, points=points)
+        except Exception as e:
+            # Non-fatal: markers are an optimization for incremental sync.
+            self.logger.warning("Failed to upsert file markers: %s", e)
 
     def _delete_points_for_file(self, relative_path: str, repo_id: str, file_id: str) -> None:
         """Delete all points for a file, scoped by repo_id+file_id (multi-repo safe)."""
@@ -2378,7 +2546,7 @@ class GitHubToQdrantProcessor:
             Deterministic UUID string
         """
         # Create deterministic UUID based on content hash and file context
-        content_hash = hashlib.md5(content.encode()).hexdigest()
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         # Create a deterministic UUID from the hash
         namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
