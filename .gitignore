@@ -2,19 +2,14 @@
 
 # API Keys and Sensitive Configuration Files
 # NEVER commit files containing real API keys!
-config.json
-config.yaml
-config_*.json
-config_*.yaml
-config.*.yaml
-!config.json.example
-!config.yaml.example
-!config.*.yaml.example
-repositories.yaml
-repositories_*.yaml
-repositories.*.yaml
-!repositories.yaml.example
-!repositories.*.yaml.example
+#
+# Ignore all local configs by default, but allow committing example templates.
+config*.json
+config*.yaml
+!config*.example
+
+repositories*.yaml
+!repositories*.example
 CLAUDE.md
 *.secret.json
 *.secret.yaml
