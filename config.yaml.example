@@ -209,6 +209,12 @@ processing:
   # Incremental sync (optional)
   # If enabled, the pipeline will skip fully-ingested, unchanged files based on file_hash.
   track_file_changes: false
+
+  # Orphaned marker cleanup (optional, requires track_file_changes: true)
+  # If enabled, removes file markers for files that no longer exist in the repository.
+  # This prevents accumulation of stale markers over time. Safe for all setups.
+  cleanup_orphaned_markers: false
+
   # Legacy cleanup (advanced): if you are upgrading an existing collection that predates repo_id/file_id/file_upload_id,
   # you can temporarily enable this to delete old points by file_path. Leave disabled for shared-collection setups.
   legacy_cleanup_delete_by_file_path: false

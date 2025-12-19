@@ -301,6 +301,94 @@ Embedding Cache Performance:
 ============================================================
 ```
 
+### 🔍 RAG Retrieval & Querying
+
+Query your vector database using the included retrieval CLI:
+
+**Basic Query:**
+```bash
+python rag_retrieval.py config.yaml --query "How do I configure authentication?"
+```
+
+**With Filters:**
+```yaml
+# In config.yaml:
+retrieval:
+  top_k: 10
+  fetch_k: 40  # Retrieves more candidates for grouping
+  max_chunks_per_file: 3  # Caps results per file
+  filters:
+    repository: my-repo-name  # Optional filtering
+```
+
+**JSON Output (for programmatic use):**
+```bash
+python rag_retrieval.py config.yaml --query "setup guide" --format json
+```
+
+**Verbose Logging:**
+```bash
+python rag_retrieval.py config.yaml --query "api reference" --verbose
+```
+
+**Features:**
+- ✅ **Smart Grouping**: Caps results per file for better context diversity
+- ✅ **Parent Window Expansion**: Retrieve surrounding context around matched chunks
+- ✅ **Multiple Output Formats**: Human-readable text or machine-readable JSON
+- ✅ **Flexible Filtering**: Filter by repository, file type, or any metadata field
+- ✅ **Timing Information**: Debug mode shows embedding, search, and grouping times
+- ✅ **Robust Error Handling**: Clear error messages and suggestions
+
+**Parent Window Context:**
+```bash
+# Retrieve surrounding chunks for expanded context
+python rag_retrieval.py config.yaml --query "installation" --with-parent-window
+```
+
+**Example Output:**
+```
+INFO: Querying collection: my-docs
+INFO: Query: How do I configure authentication?
+INFO: Returning 10 results
+
+#1 score=0.8234 file=docs/authentication.md
+preview: Configure authentication using OAuth2 or API keys...
+
+#2 score=0.7891 file=guides/setup.md
+preview: Authentication setup requires the following steps...
+
+#3 score=0.7654 file=api/reference.md
+preview: API authentication methods include bearer tokens...
+```
+
+**Configuration Options:**
+```yaml
+retrieval:
+  top_k: 10                  # Final number of results to return
+  fetch_k: 40                # Candidates to fetch before grouping (should be 3-4x top_k)
+  max_chunks_per_file: 3     # Maximum results per file
+  parent_window: 2           # Chunks before/after for context expansion
+  filters:                   # Optional metadata filters
+    repository: my-repo
+    source_type: markdown
+```
+
+**CLI Arguments:**
+- `--query`: Your search query (required)
+- `--limit`: Override config's top_k
+- `--format`: Output format (text or json)
+- `--with-parent-window`: Enable context expansion
+- `--verbose` / `-v`: Enable debug logging
+- `--quiet` / `-q`: Suppress info messages
+
+**Use Cases:**
+- 🤖 **AI Chatbots**: Retrieve relevant context for LLM responses
+- 🔍 **Semantic Search**: Find similar content across documentation
+- 📚 **Documentation Q&A**: Answer questions from your knowledge base
+- 🧪 **Testing Retrieval Quality**: Evaluate embedding and chunking strategies
+
+---
+
 ### Multiple Configurations
 ```bash
 # Different repository configurations

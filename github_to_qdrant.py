@@ -1818,8 +1818,7 @@ class GitHubToQdrantProcessor:
             field_path = (
                 f"metadata.{name}" if metadata_structure == "nested" else str(name)
             )
-            if field_path in existing_schema:
-                continue
+
             schema = type_map.get(type_name)
             if schema is None:
                 self.logger.warning(
@@ -1827,6 +1826,19 @@ class GitHubToQdrantProcessor:
                     type_name,
                     field_path,
                 )
+                continue
+
+            # Check for type mismatch if index already exists
+            if field_path in existing_schema:
+                existing_type = existing_schema[field_path]
+                if existing_type != schema:
+                    self.logger.warning(
+                        "Index type mismatch for '%s': existing=%s, requested=%s. "
+                        "Recreate collection to change index types.",
+                        field_path,
+                        existing_type,
+                        schema,
+                    )
                 continue
 
             try:
@@ -1884,6 +1896,9 @@ class GitHubToQdrantProcessor:
         # because deduplication can legitimately reduce the number of stored chunks.
         markers_to_upsert: list[dict[str, Any]] = []
 
+        # Track file_ids for orphaned marker cleanup
+        processed_file_ids: set[str] = set()
+
         # Process each file
         for i, file_path in enumerate(text_files, 1):
             relative_path = os.path.relpath(file_path, repo_root)
@@ -1899,6 +1914,9 @@ class GitHubToQdrantProcessor:
                 file_id = hashlib.sha256(
                     f"{repo_id}:{relative_path}".encode("utf-8")
                 ).hexdigest()
+
+                # Track this file for orphaned marker cleanup
+                processed_file_ids.add(file_id)
 
                 # Read file content
                 if file_path.lower().endswith(".pdf") and pdf_processor:
@@ -2042,6 +2060,16 @@ class GitHubToQdrantProcessor:
         # a successful upload of all chunks (so interrupted runs won't create false "complete" states).
         if track_changes and markers_to_upsert:
             self._upsert_file_markers(markers_to_upsert)
+
+        # Cleanup orphaned markers (files that no longer exist in the repo)
+        if track_changes and processed_file_ids:
+            # Get repo_id from first processed file (all files in same repo have same repo_id)
+            repo_url = self.config["github"].get("repository_url", "")
+            branch_name = self.config["github"].get("branch", "main")
+            repo_id = hashlib.sha256(
+                f"{repo_url}@{branch_name}".encode("utf-8")
+            ).hexdigest()
+            self._cleanup_orphaned_markers(repo_id, processed_file_ids)
 
         return len(all_chunks)
 
@@ -2278,8 +2306,98 @@ class GitHubToQdrantProcessor:
             # Upsert markers in a single request (cheap)
             self.qdrant_client.upsert(collection_name=collection_name, points=points)
         except Exception as e:
-            # Non-fatal: markers are an optimization for incremental sync.
+            # Non-fatal but important: markers enable incremental sync
             self.logger.warning("Failed to upsert file markers: %s", e)
+            print(
+                "⚠️  Warning: Could not save incremental sync markers. "
+                "Next run will reprocess all files."
+            )
+
+    def _cleanup_orphaned_markers(
+        self, repo_id: str, current_file_ids: set[str]
+    ) -> None:
+        """
+        Remove markers for files that no longer exist in the repository.
+        This prevents accumulation of stale markers over time.
+
+        Args:
+            repo_id: Repository identifier (SHA-256 of repo_url@branch)
+            current_file_ids: Set of file_id values for files processed in current run
+        """
+        if not self.qdrant_client:
+            return
+
+        # Only run if explicitly enabled in config
+        cleanup_enabled = self.config.get("processing", {}).get(
+            "cleanup_orphaned_markers", False
+        )
+        if not cleanup_enabled:
+            return
+
+        try:
+            collection_name = self.config["qdrant"]["collection_name"]
+            metadata_structure = self.config.get("payload", {}).get(
+                "metadata_structure", "nested"
+            )
+
+            repo_id_field = self._payload_field("repo_id")
+            marker_type_field = self._payload_field("record_type")
+
+            # Query for all markers belonging to this repo
+            marker_filter = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key=repo_id_field,
+                        match=qdrant_models.MatchValue(value=repo_id),
+                    ),
+                    qdrant_models.FieldCondition(
+                        key=marker_type_field,
+                        match=qdrant_models.MatchValue(value="file_marker"),
+                    ),
+                ]
+            )
+
+            # Scroll through all markers (use scroll to handle large collections)
+            orphaned_ids = []
+            offset = None
+            while True:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=marker_filter,
+                    limit=100,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset,
+                )
+
+                for point in points:
+                    payload = point.payload or {}
+                    meta = (
+                        payload.get("metadata", {})
+                        if metadata_structure == "nested"
+                        else payload
+                    )
+                    file_id = meta.get("file_id")
+                    if file_id and file_id not in current_file_ids:
+                        orphaned_ids.append(point.id)
+
+                if offset is None:
+                    break
+
+            if orphaned_ids:
+                self.logger.info(f"Cleaning up {len(orphaned_ids)} orphaned markers")
+                self.qdrant_client.delete(
+                    collection_name=collection_name,
+                    points_selector=orphaned_ids,
+                    wait=True,
+                )
+                print(f"   🧹 Cleaned up {len(orphaned_ids)} orphaned file markers")
+            else:
+                self.logger.debug("No orphaned markers found")
+
+        except Exception as e:
+            # Non-fatal: cleanup is an optimization
+            self.logger.warning("Failed to cleanup orphaned markers: %s", e)
 
     def _delete_points_for_file(
         self, relative_path: str, repo_id: str, file_id: str
