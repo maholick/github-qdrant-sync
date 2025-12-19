@@ -2309,8 +2309,8 @@ class GitHubToQdrantProcessor:
             # Non-fatal but important: markers enable incremental sync
             self.logger.warning("Failed to upsert file markers: %s", e)
             print(
-                f"⚠️  Warning: Could not save incremental sync markers. "
-                f"Next run will reprocess all files."
+                "⚠️  Warning: Could not save incremental sync markers. "
+                "Next run will reprocess all files."
             )
 
     def _cleanup_orphaned_markers(
@@ -2341,7 +2341,6 @@ class GitHubToQdrantProcessor:
             )
 
             repo_id_field = self._payload_field("repo_id")
-            file_id_field = self._payload_field("file_id")
             marker_type_field = self._payload_field("record_type")
 
             # Query for all markers belonging to this repo
