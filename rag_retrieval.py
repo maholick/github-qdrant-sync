@@ -395,7 +395,7 @@ def main() -> None:
     selected = grouped[:top_k]
     t_group = time.time() - t0
     logger.debug(
-        f"Grouping completed in {t_group:.2f}s, selected {len(selected)} results from {len(set(_extract_meta(h.payload, metadata_structure, 'file_path') or _extract_meta(h.payload, metadata_structure, 'source') for h in hits))} files"
+        f"Grouping completed in {t_group:.2f}s, selected {len(selected)} results from {len(set(_extract_meta(h.payload, metadata_structure).get('file_path') or _extract_meta(h.payload, metadata_structure).get('source') for h in hits))} files"
     )
 
     logger.info(f"Returning {len(selected)} results")
