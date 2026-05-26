@@ -2,7 +2,7 @@
 
 **High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and 150+ text file types into searchable vector databases for AI applications. Now with multi-repository batch processing, multiple embedding providers, and state-of-the-art deduplication algorithms.**
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -27,6 +27,8 @@ This project automatically processes GitHub repositories containing documentatio
 - 🎨 **Semantic Chunking**: Context-aware text splitting for better retrieval (v0.3.1)
 - 📈 **Quality Scoring**: Rank chunks by information density and relevance (v0.3.2)
 - 🔧 **Configurable Payloads**: Choose content fields for compatibility (v0.3.2)
+- 🧩 **Hybrid Retrieval**: Optional dense + sparse BM25 search with Qdrant Query API (v0.5)
+- 🗜️ **TurboQuant Ready**: Optional Qdrant 1.18+ TurboQuant collection setup (v0.5)
 
 ### 🎯 Perfect For
 
@@ -75,7 +77,7 @@ python github_to_qdrant.py config.yaml
 
 ### System Requirements
 
-- **Python 3.8+** 
+- **Python 3.10+**
 - **4GB+ RAM** (for large repositories)
 - **Internet connection** (for API calls)
 
@@ -87,7 +89,7 @@ pip install -r requirements.txt
 
 **Core Dependencies:**
 - `langchain` - Document processing
-- `qdrant-client` - Vector database
+- `qdrant-client>=1.18.0` - Vector database client with TurboQuant support
 - `openai` - Azure OpenAI embeddings
 - `numpy` - Vectorized operations
 - `mistralai` - Mistral AI embeddings
@@ -124,6 +126,7 @@ qdrant:
   api_key: ${QDRANT_API_KEY}
   collection_name: your-collection
   vector_size: 3072  # Must match embedding model
+  upload_batch_size: 64
 ```
 
 ### 🤖 Embedding Providers
@@ -190,6 +193,7 @@ processing:
 
 # New in v0.3.2: Configurable payload fields
 payload:
+  metadata_structure: nested     # nested or flat
   content_fields:
     - content      # For n8n compatibility
     - page_content # For LangChain
@@ -198,6 +202,30 @@ payload:
   preview_length: 200           # Preview snippet length
   minimal_mode: false           # Reduce payload size by 50%
 ```
+
+### 🧩 Qdrant 1.18+ Options
+
+TurboQuant is opt-in and requires Qdrant server or Cloud 1.18+ plus `qdrant-client>=1.18.0`. Start with `bits4` on a test collection before enabling it for production data. Sparse BM25 vectors use Qdrant `Document` inference; set `qdrant.cloud_inference: true` for Qdrant Cloud/server inference or install `qdrant-client[fastembed]` for local inference.
+
+```yaml
+qdrant:
+  vector_name: dense  # Required when sparse_vector.enabled is true
+  cloud_inference: false
+
+  quantization:
+    enabled: false
+    method: turbo
+    bits: bits4       # bits4, bits2, bits1_5, or bits1
+    always_ram: true
+    apply_to_existing_collections: false
+
+  sparse_vector:
+    enabled: false
+    name: sparse
+    model: qdrant/bm25
+```
+
+Other recent Qdrant features are mainly operational wins for this project: 1.18 adds memory monitoring, per-collection metrics, strict-mode guardrails, audit-log querying, and in-place named-vector schema changes; 1.17 improves write-load search latency and observability; 1.16 improves filtered search and disk-efficient storage. Hybrid retrieval and TurboQuant are the pieces wired into this repo because they directly affect ingestion and RAG quality.
 
 ## 🚀 Usage Examples
 
@@ -314,12 +342,32 @@ python rag_retrieval.py config.yaml --query "How do I configure authentication?"
 ```yaml
 # In config.yaml:
 retrieval:
+  mode: dense
   top_k: 10
   fetch_k: 40  # Retrieves more candidates for grouping
   max_chunks_per_file: 3  # Caps results per file
   filters:
     repository: my-repo-name  # Optional filtering
 ```
+
+**Hybrid Dense + Sparse Retrieval (Qdrant 1.18+):**
+```yaml
+qdrant:
+  vector_name: dense
+  cloud_inference: true  # Or install qdrant-client[fastembed] for local sparse inference
+  sparse_vector:
+    enabled: true
+    name: sparse
+    model: qdrant/bm25
+
+retrieval:
+  mode: hybrid
+  fusion: rrf
+  top_k: 10
+  fetch_k: 40
+```
+
+Hybrid mode stores a named dense vector and a sparse BM25 vector per chunk, then uses Qdrant Query API prefetches with reciprocal-rank fusion. Existing unnamed-vector collections should be recreated or migrated intentionally before enabling hybrid mode.
 
 **JSON Output (for programmatic use):**
 ```bash
@@ -336,6 +384,8 @@ python rag_retrieval.py config.yaml --query "api reference" --verbose
 - ✅ **Parent Window Expansion**: Retrieve surrounding context around matched chunks
 - ✅ **Multiple Output Formats**: Human-readable text or machine-readable JSON
 - ✅ **Flexible Filtering**: Filter by repository, file type, or any metadata field
+- ✅ **Marker Exclusion**: Internal incremental-sync markers are hidden by default
+- ✅ **Hybrid Search**: Optional dense+sparse retrieval for better keyword recall
 - ✅ **Timing Information**: Debug mode shows embedding, search, and grouping times
 - ✅ **Robust Error Handling**: Clear error messages and suggestions
 
@@ -364,6 +414,8 @@ preview: API authentication methods include bearer tokens...
 **Configuration Options:**
 ```yaml
 retrieval:
+  mode: dense                 # dense or hybrid
+  fusion: rrf                 # hybrid only: rrf or dbsf
   top_k: 10                  # Final number of results to return
   fetch_k: 40                # Candidates to fetch before grouping (should be 3-4x top_k)
   max_chunks_per_file: 3     # Maximum results per file
@@ -548,23 +600,23 @@ This project uses a **configurable payload structure** for maximum compatibility
 
 For large collections, enabling payload indexes improves performance for filtered queries (e.g. “only PDFs”, “only a specific repository”, “only a specific file path”).
 
-- **Nested metadata (`payload.metadata_structure: nested`)**: index fields use paths like `metadata.repository`.\n
-- **Flat metadata (`payload.metadata_structure: flat`)**: index fields use paths like `repository`.\n
+- **Nested metadata (`payload.metadata_structure: nested`)**: index fields use paths like `metadata.repository`.
+- **Flat metadata (`payload.metadata_structure: flat`)**: index fields use paths like `repository`.
 
-Configure in `qdrant.payload_indexes` in `config.yaml` (see `config.yaml.example`).\n
+Configure in `qdrant.payload_indexes` in `config.yaml` (see `config.yaml.example`).
 
 ### 🔁 Incremental Sync (track_file_changes) and Shared Collections
 
-When `processing.track_file_changes: true`, the pipeline computes a **SHA-256** `file_hash` per file and uses deterministic identifiers to safely support either:\n
-- **One repo per collection**, or\n
-- **Multiple repos/branches sharing a collection**.\n
+When `processing.track_file_changes: true`, the pipeline computes a **SHA-256** `file_hash` per file and uses deterministic identifiers to safely support either:
+- **One repo per collection**, or
+- **Multiple repos/branches sharing a collection**.
 
-Key metadata fields:\n
-- `repo_id`: SHA-256 of `repo_url@branch`\n
-- `file_id`: SHA-256 of `repo_id:file_path`\n
-- `file_upload_id`: SHA-256 of `file_id:file_hash`\n
+Key metadata fields:
+- `repo_id`: SHA-256 of `repo_url@branch`
+- `file_id`: SHA-256 of `repo_id:file_path`
+- `file_upload_id`: SHA-256 of `file_id:file_hash`
 
-This prevents accidental cross-repo deletes when different repos contain the same `file_path`, and it enables auto-repair of partial uploads by requiring a file to be fully present (all chunks) before it can be skipped.\n
+This prevents accidental cross-repo deletes when different repos contain the same `file_path`, and it enables auto-repair of partial uploads by writing a per-file marker only after upload succeeds.
 
 ```json
 {
@@ -797,6 +849,20 @@ echo "Vector database updated successfully"
 - Upload to Qdrant: 1 minute
 
 ## 📝 Changelog
+
+### v0.5.0 (2026-05-26) - Qdrant 1.18 & RAG Quality Modernization
+- ✨ **TurboQuant Support**: Optional Qdrant 1.18+ TurboQuant collection config
+- ✨ **Hybrid Retrieval**: Optional dense + sparse BM25 ingestion and RRF querying
+- 🔧 **Shared Qdrant Config**: Ingestion and retrieval now share connection parsing
+- 🐛 **Metadata Config Fix**: `payload.metadata_structure` is canonical, with legacy fallback
+- 🐛 **Exclude Pattern Fixes**: Glob-aware excludes for paths like `*.pyc`
+- 🧪 **Unit Tests**: Added pytest coverage for config, payloads, Qdrant setup, and retrieval
+
+### v0.4.1 (2025-12-19) - Robustness & Reliability Improvements
+- 🐛 **Retrieval Fixes**: Fixed `fetch_k` defaults, collection existence checks, empty result guidance, and debug logging
+- ✨ **CLI Polish**: Added JSON output, verbose/quiet logging, timing details, and clearer help text
+- 🔧 **Pipeline Reliability**: Added orphaned marker cleanup, config validation, and payload index mismatch warnings
+- 📚 **Documentation**: Expanded retrieval docs and updated example configs
 
 ### v0.4.0 (2025-12-17) - Retrieval, Indexing & Robust Incremental Sync
 - ✨ **Retrieval CLI**: Added `rag_retrieval.py` for querying Qdrant collections

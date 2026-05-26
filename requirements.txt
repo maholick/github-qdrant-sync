@@ -4,7 +4,7 @@ langchain-community>=0.4.1
 langchain-experimental>=0.4.1
 langchain-core>=1.2.1
 langchain-text-splitters>=1.1.0
-qdrant-client>=1.16.2
+qdrant-client>=1.18.0
 openai>=2.13.0
 tiktoken>=0.12.0
 numpy>=2.3.5
@@ -25,6 +25,7 @@ pypdf>=6.4.2    # Alternative PDF extraction
 # Pillow>=10.0.0   # Not needed since we use Mistral API
 
 # For code formatting and linting
+pytest>=9.0.3
 ruff>=0.14.9
 pylint>=4.0.4
 isort>=7.0.0

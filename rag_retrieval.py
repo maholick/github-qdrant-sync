@@ -24,7 +24,14 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as m
 
-from github_to_qdrant import MistralEmbeddingClient, SentenceTransformerClient
+from github_to_qdrant import (
+    MistralEmbeddingClient,
+    SentenceTransformerClient,
+    create_qdrant_client_from_config,
+    get_metadata_structure,
+    marker_exclusion_filter,
+    payload_field_path,
+)
 from langchain_openai import AzureOpenAIEmbeddings
 
 
@@ -58,15 +65,24 @@ def _resolve_env_vars(obj: Any) -> Any:
 
 
 def _field_path(name: str, metadata_structure: str) -> str:
-    return f"metadata.{name}" if metadata_structure == "nested" else name
+    return payload_field_path(name, metadata_structure)
 
 
 def _build_filter(
-    metadata_structure: str, raw_filters: Optional[Dict[str, Any]]
+    metadata_structure: str,
+    raw_filters: Optional[Dict[str, Any]],
+    *,
+    exclude_markers: bool = True,
 ) -> Optional[m.Filter]:
-    if not raw_filters:
-        return None
     must: List[m.FieldCondition] = []
+    must_not = []
+    if exclude_markers:
+        marker_filter = marker_exclusion_filter(metadata_structure)
+        must_not.extend(marker_filter.must_not or [])
+
+    if not raw_filters:
+        return m.Filter(must_not=must_not) if must_not else None
+
     for key, value in raw_filters.items():
         must.append(
             m.FieldCondition(
@@ -74,7 +90,7 @@ def _build_filter(
                 match=m.MatchValue(value=value),
             )
         )
-    return m.Filter(must=must) if must else None
+    return m.Filter(must=must, must_not=must_not) if must or must_not else None
 
 
 def _group_by_file(
@@ -212,6 +228,74 @@ def _expand_parent_window(
     return "\n\n".join([t for t in texts if t])
 
 
+def _execute_search(
+    client: QdrantClient,
+    collection: str,
+    query_text: str,
+    query_vec: List[float],
+    qcfg: Dict[str, Any],
+    retrieval: Dict[str, Any],
+    qdrant_filter: Optional[m.Filter],
+    fetch_k: int,
+) -> List[m.ScoredPoint]:
+    """Execute dense-only or hybrid dense+sparse search."""
+    vector_name = qcfg.get("vector_name")
+    retrieval_mode = str(retrieval.get("mode", "dense")).lower()
+
+    if retrieval_mode == "hybrid":
+        sparse_cfg = qcfg.get("sparse_vector", {})
+        if not vector_name:
+            raise SystemExit(
+                "Hybrid retrieval requires qdrant.vector_name for the dense vector "
+                "(for example: vector_name: dense)."
+            )
+        if not sparse_cfg.get("enabled", False):
+            raise SystemExit(
+                "Hybrid retrieval requires qdrant.sparse_vector.enabled: true."
+            )
+
+        fusion_name = str(retrieval.get("fusion", "rrf")).lower()
+        fusion = m.Fusion.RRF if fusion_name == "rrf" else m.Fusion.DBSF
+        sparse_name = sparse_cfg.get("name", "sparse")
+        sparse_model = sparse_cfg.get("model", "qdrant/bm25")
+
+        return client.query_points(
+            collection_name=collection,
+            prefetch=[
+                m.Prefetch(
+                    query=query_vec,
+                    using=vector_name,
+                    filter=qdrant_filter,
+                    limit=fetch_k,
+                ),
+                m.Prefetch(
+                    query=m.Document(text=query_text, model=sparse_model),
+                    using=sparse_name,
+                    filter=qdrant_filter,
+                    limit=fetch_k,
+                ),
+            ],
+            query=m.FusionQuery(fusion=fusion),
+            query_filter=qdrant_filter,
+            limit=fetch_k,
+            with_payload=True,
+            with_vectors=False,
+        ).points
+
+    query_kwargs = {
+        "collection_name": collection,
+        "query": query_vec,
+        "query_filter": qdrant_filter,
+        "limit": fetch_k,
+        "with_payload": True,
+        "with_vectors": False,
+    }
+    if vector_name:
+        query_kwargs["using"] = vector_name
+
+    return client.query_points(**query_kwargs).points
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to config.yaml used for ingestion")
@@ -268,7 +352,7 @@ def main() -> None:
 
     collection = qcfg["collection_name"]
     retrieval = cfg.get("retrieval", {})
-    metadata_structure = cfg.get("payload", {}).get("metadata_structure", "nested")
+    metadata_structure = get_metadata_structure(cfg)
 
     top_k = int(args.limit or retrieval.get("top_k", 10))
     # fetch_k should be meaningfully larger than top_k for grouping to work properly
@@ -277,74 +361,8 @@ def main() -> None:
     raw_filters = retrieval.get("filters")
     parent_window = int(retrieval.get("parent_window", 2))
 
-    # Initialize Qdrant client using the same config conventions as github_to_qdrant.py
-    url = qcfg.get("url") or os.environ.get("QDRANT_URL")
-    api_key = qcfg.get("api_key") or os.environ.get("QDRANT_API_KEY")
-    timeout = qcfg.get("timeout", 60)
-    connection_method = qcfg.get("connection_method", "auto")
-
-    if isinstance(url, str) and url.startswith("${"):
-        env_val = os.environ.get("QDRANT_URL")
-        if not env_val:
-            raise SystemExit(
-                "Qdrant URL is not configured. Set QDRANT_URL in the environment or replace "
-                "qdrant.url in your config with a concrete URL."
-            )
-        url = env_val
-
-    # Resolve host/port from url/host/port config, then apply connection_method.
-    host = qcfg.get("host")
-    port = qcfg.get("port")
-    use_https = False
-
-    if isinstance(url, str) and url:
-        if url.startswith("https://"):
-            use_https = True
-            host = host or url.replace("https://", "").split("/")[0].split(":")[0]
-            # respect explicit port in URL
-            if ":" in url.replace("https://", "").split("/")[0]:
-                port = int(url.replace("https://", "").split(":")[1].split("/")[0])
-        elif url.startswith("http://"):
-            use_https = False
-            host = host or url.replace("http://", "").split("/")[0].split(":")[0]
-            if ":" in url.replace("http://", "").split("/")[0]:
-                port = int(url.replace("http://", "").split(":")[1].split("/")[0])
-        else:
-            # hostname or hostname:port
-            if ":" in url and not host:
-                host, port_s = url.split(":", 1)
-                port = int(port_s)
-            else:
-                host = host or url
-
-    host = host or "localhost"
-    port = int(port or 6333)
-
-    if connection_method == "reverse_proxy":
-        # Match ingestion behavior: terminate TLS at 443 and disable gRPC.
-        client = QdrantClient(
-            host=host,
-            port=443,
-            https=True,
-            api_key=api_key,
-            timeout=timeout,
-            prefer_grpc=False,
-        )
-    elif (
-        connection_method == "url"
-        and isinstance(url, str)
-        and (url.startswith("https://") or url.startswith("http://"))
-    ):
-        client = QdrantClient(url=url, api_key=api_key, timeout=timeout)
-    else:
-        client = QdrantClient(
-            host=host,
-            port=port,
-            https=use_https,
-            api_key=api_key,
-            timeout=timeout,
-            prefer_grpc=False,
-        )
+    # Initialize Qdrant client using the same config conventions as ingestion.
+    client = create_qdrant_client_from_config(qcfg)
 
     # Verify collection exists before querying
     if not client.collection_exists(collection_name=collection):
@@ -364,18 +382,19 @@ def main() -> None:
     t_embed = time.time() - t0
     logger.debug(f"Query embedding generated in {t_embed:.2f}s")
 
-    # Execute vector search
-    vector_name = qcfg.get("vector_name")
+    # Execute vector or hybrid search
     qdrant_filter = _build_filter(metadata_structure, raw_filters)
     t0 = time.time()
-    hits = client.query_points(
-        collection_name=collection,
-        query={vector_name: query_vec} if vector_name else query_vec,
-        query_filter=qdrant_filter,
-        limit=fetch_k,
-        with_payload=True,
-        with_vectors=False,
-    ).points
+    hits = _execute_search(
+        client=client,
+        collection=collection,
+        query_text=args.query,
+        query_vec=query_vec,
+        qcfg=qcfg,
+        retrieval=retrieval,
+        qdrant_filter=qdrant_filter,
+        fetch_k=fetch_k,
+    )
     t_search = time.time() - t0
     logger.debug(
         f"Vector search completed in {t_search:.2f}s, retrieved {len(hits)} candidates"

@@ -15,8 +15,20 @@ qdrant:
   distance: Cosine
   vector_name: null
   recreate_collection: true
+  upload_batch_size: 64
   connection_method: auto
   timeout: 30
+  cloud_inference: false
+  quantization:
+    enabled: false
+    method: turbo
+    bits: bits4
+    always_ram: true
+    apply_to_existing_collections: false
+  sparse_vector:
+    enabled: false
+    name: sparse
+    model: qdrant/bm25
   payload_indexes:
     enabled: true
     apply_to_existing_collections: true
@@ -75,6 +87,8 @@ output:
   combined_filename: __combined_markdown.md
   preserve_structure: true
 retrieval:
+  mode: dense
+  fusion: rrf
   top_k: 5
   fetch_k: 20
   max_chunks_per_file: 2

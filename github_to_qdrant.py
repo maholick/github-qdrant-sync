@@ -8,6 +8,7 @@ using various embedding providers (Azure OpenAI, Mistral AI, or Sentence Transfo
 """
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import logging
@@ -235,6 +236,84 @@ def calculate_quality_score(chunk: Document) -> float:
     return round(sum(score_components), 2)
 
 
+def get_metadata_structure(config: Dict[str, Any]) -> str:
+    """
+    Return the configured payload metadata layout.
+
+    `payload.metadata_structure` is the canonical location. The retrieval section
+    fallback preserves compatibility with older example configs that placed this
+    option under `retrieval`.
+    """
+    payload_value = config.get("payload", {}).get("metadata_structure")
+    if payload_value in {"nested", "flat"}:
+        return payload_value
+
+    retrieval_value = config.get("retrieval", {}).get("metadata_structure")
+    if retrieval_value in {"nested", "flat"}:
+        return retrieval_value
+
+    return "nested"
+
+
+def payload_field_path(name: str, metadata_structure: str) -> str:
+    """Map a logical metadata field to the configured Qdrant payload path."""
+    return f"metadata.{name}" if metadata_structure == "nested" else name
+
+
+def marker_exclusion_filter(metadata_structure: str) -> qdrant_models.Filter:
+    """Build a filter that excludes internal incremental-sync marker points."""
+    return qdrant_models.Filter(
+        must_not=[
+            qdrant_models.FieldCondition(
+                key=payload_field_path("record_type", metadata_structure),
+                match=qdrant_models.MatchValue(value="file_marker"),
+            )
+        ]
+    )
+
+
+def is_excluded_path(path: str, root: str, exclude_patterns: List[str]) -> bool:
+    """
+    Return whether a file or directory path matches configured exclude patterns.
+
+    Supports basename globs such as `*.pyc`, path globs such as `docs/generated/*`,
+    and directory segment names such as `node_modules`.
+    """
+    try:
+        relative_path = os.path.relpath(path, root)
+    except ValueError:
+        relative_path = path
+
+    normalized = relative_path.replace("\\", "/").strip("/")
+    basename = os.path.basename(normalized)
+    parts = [part for part in normalized.split("/") if part and part != "."]
+
+    for raw_pattern in exclude_patterns:
+        pattern = str(raw_pattern).replace("\\", "/").strip("/")
+        if not pattern:
+            continue
+
+        if any(char in pattern for char in "*?[]"):
+            if fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(
+                basename, pattern
+            ):
+                return True
+            if "/" not in pattern and any(
+                fnmatch.fnmatch(part, pattern) for part in parts
+            ):
+                return True
+            continue
+
+        if (
+            pattern in parts
+            or normalized == pattern
+            or normalized.startswith(f"{pattern}/")
+        ):
+            return True
+
+    return False
+
+
 def create_payload(
     chunk: Document,
     config: Dict[str, Any],
@@ -253,7 +332,7 @@ def create_payload(
     content_fields = payload_config.get("content_fields", ["content", "page_content"])
     preview_length = payload_config.get("preview_length", 200)
     minimal_mode = payload_config.get("minimal_mode", False)
-    metadata_structure = payload_config.get("metadata_structure", "nested")
+    metadata_structure = get_metadata_structure(config)
     metadata_allowlist = payload_config.get("metadata_allowlist")
     metadata_denylist = payload_config.get("metadata_denylist", [])
 
@@ -379,6 +458,16 @@ class ProcessingResult:
     processing_time: float = 0.0
 
 
+@dataclass
+class UploadStats:
+    """Exact chunk upload statistics for one ingestion operation."""
+
+    original_chunks: int = 0
+    unique_chunks: int = 0
+    uploaded_chunks: int = 0
+    deduplicated_chunks: int = 0
+
+
 # Mistral AI imports (optional)
 try:
     from mistralai import Mistral
@@ -479,6 +568,173 @@ class ConfigLoader:
             return re.sub(pattern, replacer, obj)
         else:
             return obj
+
+
+def _resolve_placeholder(value: Any, env_name: str) -> Any:
+    """Resolve unresolved ${VAR} placeholders left in optional config values."""
+    if isinstance(value, str) and value.startswith("${"):
+        return os.environ.get(env_name)
+    return value
+
+
+def create_qdrant_client_from_config(
+    qdrant_config: Dict[str, Any],
+    *,
+    test_connection: bool = False,
+    log_status: bool = False,
+) -> QdrantClient:
+    """
+    Create a Qdrant client from this project's config conventions.
+
+    Used by ingestion and retrieval so connection parsing does not drift.
+    """
+    connection_method = qdrant_config.get("connection_method", "auto")
+    raw_url = qdrant_config.get("url") or os.environ.get("QDRANT_URL")
+    url = _resolve_placeholder(raw_url, "QDRANT_URL")
+    if isinstance(raw_url, str) and raw_url.startswith("${") and not url:
+        raise ValueError(
+            "Qdrant URL is not configured. Set QDRANT_URL or replace qdrant.url "
+            "with a concrete URL."
+        )
+    api_key = _resolve_placeholder(
+        qdrant_config.get("api_key") or os.environ.get("QDRANT_API_KEY"),
+        "QDRANT_API_KEY",
+    )
+    timeout = qdrant_config.get("timeout", 30)
+
+    hostname = qdrant_config.get("host", "")
+    port = qdrant_config.get("port")
+    use_https = False
+    default_port = 6333
+
+    if isinstance(url, str) and url:
+        if url.startswith(("https://", "http://")):
+            parsed = urlparse(url)
+            hostname = hostname or parsed.hostname or ""
+            use_https = parsed.scheme == "https"
+            if parsed.port:
+                default_port = parsed.port
+        elif ":" in url and not hostname:
+            hostname, port_s = url.split(":", 1)
+            default_port = int(port_s)
+        else:
+            hostname = hostname or url
+
+    hostname = hostname or "localhost"
+    port = int(port or default_port)
+
+    common_kwargs = {
+        "api_key": api_key,
+        "timeout": timeout,
+        "cloud_inference": bool(qdrant_config.get("cloud_inference", False)),
+    }
+    if qdrant_config.get("local_inference_batch_size") is not None:
+        common_kwargs["local_inference_batch_size"] = qdrant_config[
+            "local_inference_batch_size"
+        ]
+
+    attempts = []
+    if connection_method == "auto":
+        if log_status:
+            print("🔍 Auto-detecting Qdrant connection method...")
+        if use_https:
+            attempts.append(
+                (
+                    "reverse_proxy",
+                    lambda: QdrantClient(
+                        host=hostname,
+                        port=443,
+                        https=True,
+                        prefer_grpc=False,
+                        **common_kwargs,
+                    ),
+                )
+            )
+        attempts.append(
+            (
+                "direct",
+                lambda: QdrantClient(
+                    host=hostname,
+                    port=port,
+                    https=use_https,
+                    **common_kwargs,
+                ),
+            )
+        )
+        if url:
+            attempts.append(
+                (
+                    "url",
+                    lambda: QdrantClient(
+                        url=url,
+                        prefer_grpc=False,
+                        **common_kwargs,
+                    ),
+                )
+            )
+    elif connection_method == "reverse_proxy":
+        attempts.append(
+            (
+                "reverse_proxy",
+                lambda: QdrantClient(
+                    host=hostname,
+                    port=443,
+                    https=True,
+                    prefer_grpc=False,
+                    **common_kwargs,
+                ),
+            )
+        )
+    elif connection_method == "direct":
+        attempts.append(
+            (
+                "direct",
+                lambda: QdrantClient(
+                    host=hostname,
+                    port=port,
+                    https=use_https,
+                    **common_kwargs,
+                ),
+            )
+        )
+    elif connection_method == "url":
+        if not url:
+            raise ValueError("qdrant.url is required when connection_method is 'url'")
+        attempts.append(
+            (
+                "url",
+                lambda: QdrantClient(url=url, prefer_grpc=False, **common_kwargs),
+            )
+        )
+    else:
+        raise ValueError(f"Unknown connection_method: {connection_method}")
+
+    last_error = None
+    for method_name, client_factory in attempts:
+        try:
+            client = client_factory()
+            if not test_connection:
+                return client
+            client.get_collections()
+            if log_status:
+                print(f"  ✓ Connected using {method_name}")
+                if connection_method == "auto":
+                    print(
+                        f'💡 Add "connection_method": "{method_name}" to config for faster startup'
+                    )
+            return client
+        except Exception as e:
+            last_error = e
+            if log_status and connection_method != "auto":
+                print(f"  ✗ Failed with {method_name}: {str(e)[:60]}")
+
+    raise ConnectionError(
+        f"Failed to connect to Qdrant.\n"
+        f"Connection method: {connection_method}\n"
+        f"URL: {url}\n"
+        f"Last error: {last_error}\n"
+        f"Try setting 'connection_method' to 'reverse_proxy', 'direct', or 'url'"
+    )
 
 
 class MistralEmbeddingClient:
@@ -832,165 +1088,8 @@ class GitHubToQdrantProcessor:
         Returns:
             Configured QdrantClient instance
         """
-        qdrant_config = self.config["qdrant"]
-        connection_method = qdrant_config.get("connection_method", "auto")
-
-        # Helper function to test connection
-        def test_client(client: QdrantClient, method_name: str) -> bool:
-            try:
-                client.get_collections()
-                print(f"  ✓ Connected using {method_name}")
-                return True
-            except Exception:
-                return False
-
-        # Get connection parameters
-        url = qdrant_config.get("url", "")
-        api_key = qdrant_config.get("api_key")
-        timeout = qdrant_config.get("timeout", 30)
-
-        # Parse URL components if URL is provided
-        hostname = ""
-        default_port = 6333  # Default Qdrant port
-        use_https = False
-
-        if url:
-            if url.startswith("https://"):
-                use_https = True
-                hostname = url.replace("https://", "").split("/")[0].split(":")[0]
-                # Check if custom port is specified in URL
-                if ":" in url.replace("https://", "").split("/")[0]:
-                    custom_port = int(
-                        url.replace("https://", "").split(":")[1].split("/")[0]
-                    )
-                    default_port = custom_port
-            elif url.startswith("http://"):
-                hostname = url.replace("http://", "").split("/")[0].split(":")[0]
-                if ":" in url.replace("http://", "").split("/")[0]:
-                    default_port = int(
-                        url.replace("http://", "").split(":")[1].split("/")[0]
-                    )
-            else:
-                # Assume it's just a hostname or hostname:port
-                if ":" in url:
-                    hostname = url.split(":")[0]
-                    default_port = int(url.split(":")[1])
-                else:
-                    hostname = url
-
-        # Use explicit host/port if provided in config
-        hostname = qdrant_config.get("host", hostname)
-        port = qdrant_config.get("port", default_port)
-
-        # Connection attempts based on method
-        attempts = []
-
-        if connection_method == "auto":
-            print("🔍 Auto-detecting Qdrant connection method...")
-            # Try reverse proxy first (most common for cloud services)
-            if use_https:
-                attempts.append(
-                    (
-                        "reverse_proxy",
-                        lambda: QdrantClient(
-                            host=hostname,
-                            port=443,
-                            api_key=api_key,
-                            https=True,
-                            timeout=timeout,
-                            prefer_grpc=False,
-                        ),
-                    )
-                )
-            # Try direct connection with default or specified port
-            attempts.append(
-                (
-                    "direct",
-                    lambda: QdrantClient(
-                        host=hostname,
-                        port=port,
-                        api_key=api_key,
-                        https=use_https,
-                        timeout=timeout,
-                    ),
-                )
-            )
-            # Try URL-based if URL provided
-            if url:
-                attempts.append(
-                    (
-                        "url",
-                        lambda: QdrantClient(
-                            url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
-                        ),
-                    )
-                )
-
-        elif connection_method == "reverse_proxy":
-            attempts.append(
-                (
-                    "reverse_proxy",
-                    lambda: QdrantClient(
-                        host=hostname,
-                        port=443,
-                        api_key=api_key,
-                        https=True,
-                        timeout=timeout,
-                        prefer_grpc=False,
-                    ),
-                )
-            )
-
-        elif connection_method == "direct":
-            attempts.append(
-                (
-                    "direct",
-                    lambda: QdrantClient(
-                        host=hostname,
-                        port=port,
-                        api_key=api_key,
-                        https=use_https,
-                        timeout=timeout,
-                    ),
-                )
-            )
-
-        elif connection_method == "url":
-            attempts.append(
-                (
-                    "url",
-                    lambda: QdrantClient(
-                        url=url, api_key=api_key, timeout=timeout, prefer_grpc=False
-                    ),
-                )
-            )
-
-        else:
-            raise ValueError(f"Unknown connection_method: {connection_method}")
-
-        # Try each connection method
-        last_error = None
-        for method_name, client_factory in attempts:
-            try:
-                client = client_factory()
-                if test_client(client, method_name):
-                    if connection_method == "auto":
-                        print(
-                            f'💡 Add "connection_method": "{method_name}" to config for faster startup'
-                        )
-                    return client
-            except Exception as e:
-                last_error = e
-                if connection_method != "auto":
-                    print(f"  ✗ Failed with {method_name}: {str(e)[:60]}")
-
-        # If all methods fail, provide helpful error message
-        raise ConnectionError(
-            f"Failed to connect to Qdrant.\n"
-            f"Connection method: {connection_method}\n"
-            f"URL: {url}\n"
-            f"Last error: {last_error}\n"
-            f"Try setting 'connection_method' to 'reverse_proxy', 'direct', or 'url'"
+        return create_qdrant_client_from_config(
+            self.config["qdrant"], test_connection=True, log_status=True
         )
 
     def _test_connections(self) -> None:
@@ -1140,7 +1239,11 @@ class GitHubToQdrantProcessor:
         for root, dirs, files in os.walk(directory):
             # Remove excluded directories from search
             dirs[:] = [
-                d for d in dirs if not any(pattern in d for pattern in exclude_patterns)
+                d
+                for d in dirs
+                if not is_excluded_path(
+                    os.path.join(root, d), directory, exclude_patterns
+                )
             ]
 
             for file in files:
@@ -1152,7 +1255,7 @@ class GitHubToQdrantProcessor:
                 ) or (file in no_ext_names):
                     file_path = os.path.join(root, file)
                     # Check if file path contains any exclude patterns
-                    if not any(pattern in file_path for pattern in exclude_patterns):
+                    if not is_excluded_path(file_path, directory, exclude_patterns):
                         text_files.append(file_path)
 
         file_type = "text" if file_mode == "all_text" else "markdown"
@@ -1682,6 +1785,300 @@ class GitHubToQdrantProcessor:
 
         raise Exception("Failed to generate embeddings after all retries")
 
+    def _build_quantization_config(self):
+        """Build optional Qdrant quantization config from `qdrant.quantization`."""
+        quant_cfg = self.config.get("qdrant", {}).get("quantization", {})
+        if not quant_cfg.get("enabled", False):
+            return None
+
+        method = str(quant_cfg.get("method", "turbo")).lower()
+        if method != "turbo":
+            raise ValueError(
+                "Only qdrant.quantization.method='turbo' is supported in v0.5"
+            )
+
+        bit_map = {
+            "bits1": qdrant_models.TurboQuantBitSize.BITS1,
+            "bits1_5": qdrant_models.TurboQuantBitSize.BITS1_5,
+            "bits2": qdrant_models.TurboQuantBitSize.BITS2,
+            "bits4": qdrant_models.TurboQuantBitSize.BITS4,
+        }
+        bits = str(quant_cfg.get("bits", "bits4"))
+        if bits not in bit_map:
+            raise ValueError(
+                "qdrant.quantization.bits must be one of: bits4, bits2, bits1_5, bits1"
+            )
+
+        return qdrant_models.TurboQuantization(
+            turbo=qdrant_models.TurboQuantQuantizationConfig(
+                always_ram=bool(quant_cfg.get("always_ram", True)),
+                bits=bit_map[bits],
+            )
+        )
+
+    def _sparse_vector_config(self):
+        """Build optional sparse vector config for Qdrant BM25 hybrid retrieval."""
+        sparse_cfg = self.config.get("qdrant", {}).get("sparse_vector", {})
+        if not sparse_cfg.get("enabled", False):
+            return None
+
+        sparse_name = sparse_cfg.get("name", "sparse")
+        return {
+            sparse_name: qdrant_models.SparseVectorParams(
+                modifier=qdrant_models.Modifier.IDF
+            )
+        }
+
+    def _is_sparse_vector_enabled(self) -> bool:
+        return bool(
+            self.config.get("qdrant", {}).get("sparse_vector", {}).get("enabled", False)
+        )
+
+    def _validate_sparse_vector_setup(self) -> None:
+        """Hybrid sparse vectors require named dense vectors for clear query routing."""
+        if self._is_sparse_vector_enabled() and not self.config["qdrant"].get(
+            "vector_name"
+        ):
+            raise ValueError(
+                "qdrant.sparse_vector.enabled requires qdrant.vector_name to name "
+                "the dense vector (for example: vector_name: dense)."
+            )
+        if self._is_sparse_vector_enabled() and not self.config["qdrant"].get(
+            "cloud_inference", False
+        ):
+            self.logger.warning(
+                "Sparse BM25 vectors use Qdrant Document inference. Set "
+                "qdrant.cloud_inference=true or install qdrant-client[fastembed] "
+                "for local inference."
+            )
+
+    def _validate_embeddings(
+        self, chunks: List[Document], embeddings: List[List[float]]
+    ) -> None:
+        """Validate embedding count and vector dimensions before upload."""
+        if len(chunks) != len(embeddings):
+            raise ValueError(
+                f"Embedding count mismatch: {len(chunks)} chunks but "
+                f"{len(embeddings)} embeddings"
+            )
+
+        expected_size = int(self.config["qdrant"]["vector_size"])
+        for index, embedding in enumerate(embeddings):
+            if len(embedding) != expected_size:
+                raise ValueError(
+                    f"Embedding dimension mismatch at chunk {index}: "
+                    f"expected {expected_size}, got {len(embedding)}"
+                )
+
+    def _embed_chunks(self, chunks: List[Document]) -> List[List[float]]:
+        """Generate embeddings for chunks with cache and retry handling."""
+        print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
+        all_texts = [chunk.page_content for chunk in chunks]
+
+        embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
+        batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
+        max_retries = self.config["processing"].get("max_retries", 3)
+        simulate_partial = self.config.get("processing", {}).get(
+            "simulate_partial_upload", False
+        )
+
+        all_embeddings = []
+        for i in range(0, len(all_texts), embedding_batch_size):
+            batch_texts = all_texts[i : i + embedding_batch_size]
+            batch_num = (i // embedding_batch_size) + 1
+            total_embedding_batches = (
+                len(all_texts) + embedding_batch_size - 1
+            ) // embedding_batch_size
+
+            print(
+                f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} "
+                f"({len(batch_texts)} chunks)"
+            )
+
+            batch_embeddings = []
+            texts_to_generate = []
+            text_indices = []
+            for idx, text in enumerate(batch_texts):
+                cached_embedding = self.embedding_cache.get(text)
+                if cached_embedding is not None:
+                    batch_embeddings.append(cached_embedding)
+                else:
+                    texts_to_generate.append(text)
+                    text_indices.append(idx)
+
+            if texts_to_generate:
+                new_embeddings = self._generate_embeddings_with_retry(
+                    texts_to_generate, max_retries
+                )
+                for text, embedding in zip(texts_to_generate, new_embeddings):
+                    self.embedding_cache.set(text, embedding)
+                for idx, embedding in zip(text_indices, new_embeddings):
+                    batch_embeddings.insert(idx, embedding)
+
+            all_embeddings.extend(batch_embeddings)
+
+            if simulate_partial and batch_num == 1:
+                raise RuntimeError(
+                    "Simulated partial upload (processing.simulate_partial_upload=true)"
+                )
+
+            if i + embedding_batch_size < len(all_texts) and texts_to_generate:
+                time.sleep(batch_delay)
+
+        self._validate_embeddings(chunks, all_embeddings)
+        return all_embeddings
+
+    def _build_point_vector(self, chunk: Document, embedding: List[float]):
+        """Build dense-only or dense+sparse vector payload for a Qdrant point."""
+        vector_name = self.config["qdrant"].get("vector_name")
+        sparse_cfg = self.config.get("qdrant", {}).get("sparse_vector", {})
+
+        if sparse_cfg.get("enabled", False):
+            if not vector_name:
+                raise ValueError(
+                    "Sparse vector ingestion requires qdrant.vector_name for "
+                    "the dense vector."
+                )
+            sparse_name = sparse_cfg.get("name", "sparse")
+            sparse_model = sparse_cfg.get("model", "qdrant/bm25")
+            return {
+                vector_name: embedding,
+                sparse_name: qdrant_models.Document(
+                    text=chunk.page_content, model=sparse_model
+                ),
+            }
+
+        if vector_name:
+            return {vector_name: embedding}
+        return embedding
+
+    def _build_point_id(
+        self, chunk: Document, chunk_index: int, repo_name: str, file_aware_ids: bool
+    ) -> str:
+        """Generate the appropriate deterministic ID for a chunk."""
+        file_path = chunk.metadata.get("file_path") or chunk.metadata.get(
+            "source", "unknown"
+        )
+        if file_aware_ids:
+            return self._generate_file_aware_chunk_id(
+                chunk.page_content, chunk_index, repo_name, file_path
+            )
+        return self._generate_chunk_id(
+            chunk.page_content, chunk_index, repo_name, file_path
+        )
+
+    def _upload_chunks(
+        self, chunks: List[Document], repo_name: str, *, file_aware_ids: bool
+    ) -> UploadStats:
+        """Shared embed, deduplicate, and upload pipeline for all ingestion modes."""
+        if not chunks:
+            return UploadStats()
+
+        print("\n🧠 Processing and uploading chunks to Qdrant...")
+        print(f"📝 Processing {len(chunks)} chunks")
+
+        total_chars = sum(len(chunk.page_content) for chunk in chunks)
+        avg_chunk_size = total_chars / len(chunks) if chunks else 0
+        print(f"📊 Average chunk size: {avg_chunk_size:.0f} characters")
+
+        all_embeddings = self._embed_chunks(chunks)
+
+        if self.config["processing"].get("deduplication_enabled", True):
+            print("🔍 Running deduplication analysis...")
+            similarity_threshold = self.config["processing"].get(
+                "similarity_threshold", 0.95
+            )
+            unique_chunks, unique_embeddings = self._remove_duplicates(
+                chunks, all_embeddings, similarity_threshold=similarity_threshold
+            )
+        else:
+            print("ℹ️  Deduplication disabled - using all chunks")
+            unique_chunks, unique_embeddings = chunks, all_embeddings
+
+        if not unique_chunks:
+            print("❌ No unique chunks remaining after deduplication!")
+            return UploadStats(original_chunks=len(chunks))
+
+        upload_batch_size = int(self.config["qdrant"].get("upload_batch_size", 64))
+        collection_name = self.config["qdrant"]["collection_name"]
+        total_batches = (
+            len(unique_chunks) + upload_batch_size - 1
+        ) // upload_batch_size
+
+        print(
+            f"🚀 Starting batch upload: {total_batches} batches of "
+            f"{upload_batch_size} chunks each"
+        )
+
+        successful_uploads = 0
+        for i in range(0, len(unique_chunks), upload_batch_size):
+            batch_num = i // upload_batch_size + 1
+            batch_chunks = unique_chunks[i : i + upload_batch_size]
+            batch_embeddings = unique_embeddings[i : i + upload_batch_size]
+            points = []
+
+            for j, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                chunk_index = int(chunk.metadata.get("chunk_index", i + j))
+                file_path = chunk.metadata.get("file_path") or chunk.metadata.get(
+                    "source", "unknown"
+                )
+                point_id = self._build_point_id(
+                    chunk, chunk_index, repo_name, file_aware_ids
+                )
+                payload = create_payload(
+                    chunk=chunk,
+                    config=self.config,
+                    chunk_index=chunk_index,
+                    repo_name=repo_name,
+                    file_path=file_path,
+                )
+                points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=self._build_point_vector(chunk, embedding),
+                        payload=payload,
+                    )
+                )
+
+            self.qdrant_client.upsert(collection_name=collection_name, points=points)
+            successful_uploads += len(batch_chunks)
+            print(
+                f"  ✅ Uploaded batch {batch_num}/{total_batches} "
+                f"({len(batch_chunks)} chunks)"
+            )
+
+            if batch_num % 10 == 0 or batch_num == total_batches:
+                progress = (successful_uploads / len(unique_chunks)) * 100
+                print(
+                    f"  📊 Progress: {progress:.0f}% "
+                    f"({successful_uploads}/{len(unique_chunks)} unique chunks)"
+                )
+
+        duplicate_count = len(chunks) - len(unique_chunks)
+        print(
+            f"\n✅ Upload completed: {successful_uploads} chunks uploaded to "
+            f"collection '{collection_name}'"
+        )
+        if duplicate_count > 0:
+            print(
+                f"   📊 Deduplication stats: {duplicate_count} duplicates removed "
+                f"from {len(chunks)} original chunks"
+            )
+
+        cache_stats = self.embedding_cache.get_stats()
+        if cache_stats["hits"] > 0 or cache_stats["misses"] > 0:
+            print(
+                f"   💾 Cache stats: {cache_stats['hits']} hits, "
+                f"{cache_stats['misses']} misses ({cache_stats['hit_rate']} hit rate)"
+            )
+
+        return UploadStats(
+            original_chunks=len(chunks),
+            unique_chunks=len(unique_chunks),
+            uploaded_chunks=successful_uploads,
+            deduplicated_chunks=duplicate_count,
+        )
+
     def _setup_qdrant_collection(self) -> None:
         """
         Setup or configure Qdrant collection with proper vector parameters.
@@ -1699,6 +2096,9 @@ class GitHubToQdrantProcessor:
 
         qdrant_config = self.config["qdrant"]
         collection_name = qdrant_config["collection_name"]
+        self._validate_sparse_vector_setup()
+        quantization_config = self._build_quantization_config()
+        sparse_vectors_config = self._sparse_vector_config()
 
         # Check if collection exists
         collections = self.qdrant_client.get_collections()
@@ -1715,6 +2115,14 @@ class GitHubToQdrantProcessor:
             print(f"📚 Creating new collection: {collection_name}")
             print(f"   Vector size: {qdrant_config['vector_size']}")
             print(f"   Distance metric: {qdrant_config['distance']}")
+            if quantization_config:
+                quant_cfg = qdrant_config.get("quantization", {})
+                print(f"   Quantization: TurboQuant ({quant_cfg.get('bits', 'bits4')})")
+            if sparse_vectors_config:
+                print(
+                    "   Sparse vector: "
+                    f"{qdrant_config['sparse_vector'].get('name', 'sparse')}"
+                )
 
             distance_map = {
                 "Cosine": Distance.COSINE,
@@ -1736,7 +2144,10 @@ class GitHubToQdrantProcessor:
                     )
                 }
                 self.qdrant_client.create_collection(
-                    collection_name=collection_name, vectors_config=vectors_config
+                    collection_name=collection_name,
+                    vectors_config=vectors_config,
+                    sparse_vectors_config=sparse_vectors_config,
+                    quantization_config=quantization_config,
                 )
             else:
                 print("   Creating default (unnamed) vectors")
@@ -1749,12 +2160,35 @@ class GitHubToQdrantProcessor:
                             qdrant_config["distance"], Distance.COSINE
                         ),
                     ),
+                    sparse_vectors_config=sparse_vectors_config,
+                    quantization_config=quantization_config,
                 )
             print(f"✅ Collection '{collection_name}' created successfully")
             # Optional: Create payload indexes for faster filtered queries
             self._ensure_qdrant_payload_indexes(collection_name=collection_name)
         else:
             print(f"📚 Using existing collection: {collection_name}")
+            if sparse_vectors_config:
+                try:
+                    self.qdrant_client.update_collection(
+                        collection_name=collection_name,
+                        sparse_vectors_config=sparse_vectors_config,
+                    )
+                    print("   ✅ Ensured sparse vector configuration")
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to ensure sparse vector config for '%s': %s",
+                        collection_name,
+                        e,
+                    )
+            if quantization_config and qdrant_config.get("quantization", {}).get(
+                "apply_to_existing_collections", False
+            ):
+                self.qdrant_client.update_collection(
+                    collection_name=collection_name,
+                    quantization_config=quantization_config,
+                )
+                print("   ✅ Applied quantization config to existing collection")
             # Optional: Create payload indexes for faster filtered queries
             if (
                 self.config.get("qdrant", {})
@@ -1776,8 +2210,7 @@ class GitHubToQdrantProcessor:
         if not idx_cfg.get("enabled", False):
             return
 
-        payload_cfg = self.config.get("payload", {})
-        metadata_structure = payload_cfg.get("metadata_structure", "nested")
+        metadata_structure = get_metadata_structure(self.config)
 
         fields = idx_cfg.get("fields", [])
         if not isinstance(fields, list) or not fields:
@@ -1815,9 +2248,7 @@ class GitHubToQdrantProcessor:
             if not name:
                 continue
 
-            field_path = (
-                f"metadata.{name}" if metadata_structure == "nested" else str(name)
-            )
+            field_path = payload_field_path(str(name), metadata_structure)
 
             schema = type_map.get(type_name)
             if schema is None:
@@ -2054,7 +2485,7 @@ class GitHubToQdrantProcessor:
         )
 
         # Process and upload chunks with file-aware metadata
-        self._upload_chunks_with_file_metadata(all_chunks, repo_name)
+        upload_stats = self._upload_chunks_with_file_metadata(all_chunks, repo_name)
 
         # Mark processed files as "complete" for incremental sync. We only write markers after
         # a successful upload of all chunks (so interrupted runs won't create false "complete" states).
@@ -2071,7 +2502,7 @@ class GitHubToQdrantProcessor:
             ).hexdigest()
             self._cleanup_orphaned_markers(repo_id, processed_file_ids)
 
-        return len(all_chunks)
+        return upload_stats.uploaded_chunks
 
     def _calculate_file_hash(self, file_path: str) -> str:
         """Calculate hash of file content for change detection."""
@@ -2083,10 +2514,7 @@ class GitHubToQdrantProcessor:
 
     def _payload_field(self, name: str) -> str:
         """Map a logical metadata field name to the configured payload layout."""
-        metadata_structure = self.config.get("payload", {}).get(
-            "metadata_structure", "nested"
-        )
-        return f"metadata.{name}" if metadata_structure == "nested" else name
+        return payload_field_path(name, get_metadata_structure(self.config))
 
     def _chunking_signature(self) -> str:
         """Create a stable signature for chunking configuration (affects chunk boundaries/count)."""
@@ -2249,9 +2677,7 @@ class GitHubToQdrantProcessor:
             zero_vector = [0.0] * vector_size
 
             vector_name = self.config["qdrant"].get("vector_name")
-            metadata_structure = self.config.get("payload", {}).get(
-                "metadata_structure", "nested"
-            )
+            metadata_structure = get_metadata_structure(self.config)
 
             # Qdrant point IDs must be UUID or unsigned int.
             namespace = uuid.UUID("12345678-1234-5678-1234-123456789abc")
@@ -2336,9 +2762,7 @@ class GitHubToQdrantProcessor:
 
         try:
             collection_name = self.config["qdrant"]["collection_name"]
-            metadata_structure = self.config.get("payload", {}).get(
-                "metadata_structure", "nested"
-            )
+            metadata_structure = get_metadata_structure(self.config)
 
             repo_id_field = self._payload_field("repo_id")
             marker_type_field = self._payload_field("record_type")
@@ -2483,7 +2907,7 @@ class GitHubToQdrantProcessor:
 
     def _upload_chunks_with_file_metadata(
         self, chunks: List[Document], repo_name: str
-    ) -> None:
+    ) -> UploadStats:
         """
         Upload chunks to Qdrant with file-aware metadata and improved ID generation.
 
@@ -2495,174 +2919,7 @@ class GitHubToQdrantProcessor:
             chunks: List of document chunks with file metadata
             repo_name: Repository name for ID generation
         """
-        if not chunks:
-            return
-
-        print("\n🧠 Processing and uploading chunks to Qdrant...")
-        print(f"📝 Processing {len(chunks)} chunks from individual files")
-
-        # Calculate processing stats
-        total_chars = sum(len(chunk.page_content) for chunk in chunks)
-        avg_chunk_size = total_chars / len(chunks) if chunks else 0
-        print(f"📊 Average chunk size: {avg_chunk_size:.0f} characters")
-
-        # Generate embeddings for ALL chunks
-        print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
-        all_texts = [chunk.page_content for chunk in chunks]
-
-        embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
-        batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
-
-        all_embeddings = []
-
-        simulate_partial = self.config.get("processing", {}).get(
-            "simulate_partial_upload", False
-        )
-
-        for i in range(0, len(all_texts), embedding_batch_size):
-            batch_texts = all_texts[i : i + embedding_batch_size]
-            batch_num = (i // embedding_batch_size) + 1
-            total_embedding_batches = (
-                len(all_texts) + embedding_batch_size - 1
-            ) // embedding_batch_size
-
-            print(
-                f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)"
-            )
-
-            # Check cache first
-            batch_embeddings = []
-            texts_to_generate = []
-            text_indices = []
-
-            for idx, text in enumerate(batch_texts):
-                cached_embedding = self.embedding_cache.get(text)
-                if cached_embedding is not None:
-                    batch_embeddings.append(cached_embedding)
-                else:
-                    texts_to_generate.append(text)
-                    text_indices.append(idx)
-
-            # Generate embeddings for non-cached texts
-            if texts_to_generate:
-                new_embeddings = self._generate_embeddings_with_retry(texts_to_generate)
-
-                # Cache the new embeddings
-                for text, embedding in zip(texts_to_generate, new_embeddings):
-                    self.embedding_cache.set(text, embedding)
-
-                # Insert new embeddings into batch at correct positions
-                for idx, embedding in zip(text_indices, new_embeddings):
-                    batch_embeddings.insert(idx, embedding)
-
-            all_embeddings.extend(batch_embeddings)
-
-            # Test-only: allow simulating an interrupted run after first embedding batch.
-            if simulate_partial and batch_num == 1:
-                raise RuntimeError(
-                    "Simulated partial upload (processing.simulate_partial_upload=true)"
-                )
-
-            # Delay between batches to be gentle on the API
-            if i + embedding_batch_size < len(all_texts) and texts_to_generate:
-                time.sleep(batch_delay)
-
-        # Remove duplicates based on embedding similarity (if enabled)
-        if self.config["processing"].get("deduplication_enabled", True):
-            print("🔍 Running deduplication analysis...")
-            similarity_threshold = self.config["processing"].get(
-                "similarity_threshold", 0.95
-            )
-            unique_chunks, unique_embeddings = self._remove_duplicates(
-                chunks, all_embeddings, similarity_threshold=similarity_threshold
-            )
-        else:
-            print("ℹ️  Deduplication disabled - using all chunks")
-            unique_chunks, unique_embeddings = chunks, all_embeddings
-
-        if not unique_chunks:
-            print("❌ No unique chunks remaining after deduplication!")
-            return
-
-        # Process unique chunks in batches for upload
-        batch_size = 10
-        collection_name = self.config["qdrant"]["collection_name"]
-        total_batches = (len(unique_chunks) + batch_size - 1) // batch_size
-
-        print(
-            f"🚀 Starting batch upload: {total_batches} batches of {batch_size} chunks each"
-        )
-
-        successful_uploads = 0
-
-        for i in range(0, len(unique_chunks), batch_size):
-            batch_num = i // batch_size + 1
-            batch_chunks = unique_chunks[i : i + batch_size]
-            batch_embeddings = unique_embeddings[i : i + batch_size]
-
-            try:
-                # Create points for Qdrant
-                points = []
-                for j, (chunk, embedding) in enumerate(
-                    zip(batch_chunks, batch_embeddings)
-                ):
-                    # Generate deterministic ID using file path and content
-                    file_path = chunk.metadata.get("file_path", "unknown")
-                    chunk_index = chunk.metadata.get("chunk_index", j)
-
-                    # Enhanced ID generation with file path
-                    point_id = self._generate_file_aware_chunk_id(
-                        chunk.page_content, chunk_index, repo_name, file_path
-                    )
-
-                    # Use new optimized payload creation with file metadata
-                    payload = create_payload(
-                        chunk=chunk,
-                        config=self.config,
-                        chunk_index=chunk_index,
-                        repo_name=repo_name,
-                        file_path=file_path,
-                    )
-
-                    # Handle named vectors vs default vectors
-                    vector_name = self.config["qdrant"].get("vector_name")
-                    if vector_name:
-                        points.append(
-                            PointStruct(
-                                id=point_id,
-                                vector={vector_name: embedding},
-                                payload=payload,
-                            )
-                        )
-                    else:
-                        points.append(
-                            PointStruct(id=point_id, vector=embedding, payload=payload)
-                        )
-
-                # Upload batch to Qdrant
-                self.qdrant_client.upsert(
-                    collection_name=collection_name, points=points
-                )
-
-                successful_uploads += len(batch_chunks)
-                print(
-                    f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)"
-                )
-
-                # Show progress periodically
-                if batch_num % 10 == 0 or batch_num == total_batches:
-                    progress = (successful_uploads / len(unique_chunks)) * 100
-                    print(
-                        f"  📊 Progress: {progress:.0f}% ({successful_uploads}/{len(unique_chunks)} unique chunks)"
-                    )
-
-            except Exception as e:
-                print(f"  ❌ Error uploading batch {batch_num}: {e}")
-                raise
-
-        print(
-            f"\n✅ Upload completed: {successful_uploads} chunks uploaded to collection '{collection_name}'"
-        )
+        return self._upload_chunks(chunks, repo_name, file_aware_ids=True)
 
     def _generate_file_aware_chunk_id(
         self, content: str, chunk_index: int, repo_name: str, file_path: str
@@ -2699,7 +2956,7 @@ class GitHubToQdrantProcessor:
 
     def _process_and_upload_documents(
         self, combined_content: str, repo_name: str
-    ) -> None:
+    ) -> UploadStats:
         """
         Process combined content into chunks and upload to Qdrant with comprehensive pipeline.
 
@@ -2743,194 +3000,7 @@ class GitHubToQdrantProcessor:
         chunks = self.text_splitter.split_documents([document])
         print(f"📝 Split document into {len(chunks)} chunks")
 
-        # Calculate processing stats
-        total_chars = sum(len(chunk.page_content) for chunk in chunks)
-        avg_chunk_size = total_chars / len(chunks) if chunks else 0
-        print(f"📊 Average chunk size: {avg_chunk_size:.0f} characters")
-
-        # Generate embeddings for ALL chunks first (for deduplication)
-        # Process in smaller batches to avoid rate limits
-        print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
-        all_texts = [chunk.page_content for chunk in chunks]
-
-        embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
-        max_retries = self.config["processing"].get("max_retries", 3)
-        batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
-
-        all_embeddings = []
-
-        for i in range(0, len(all_texts), embedding_batch_size):
-            batch_texts = all_texts[i : i + embedding_batch_size]
-            batch_num = (i // embedding_batch_size) + 1
-            total_embedding_batches = (
-                len(all_texts) + embedding_batch_size - 1
-            ) // embedding_batch_size
-
-            print(
-                f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} ({len(batch_texts)} chunks)"
-            )
-
-            # Use cache for individual texts in batch
-            batch_embeddings = []
-            texts_to_generate = []
-            cached_indices = []
-
-            for idx, text in enumerate(batch_texts):
-                # Try to get from cache first
-                text_hash = hashlib.md5(text.encode()).hexdigest()
-                if text_hash in self.embedding_cache.cache:
-                    # Use cached embedding
-                    batch_embeddings.append(self.embedding_cache.cache[text_hash])
-                    self.embedding_cache.hits += 1
-                else:
-                    # Mark for generation
-                    texts_to_generate.append(text)
-                    cached_indices.append(idx)
-
-            # Generate embeddings for non-cached texts
-            if texts_to_generate:
-                new_embeddings = self._generate_embeddings_with_retry(
-                    texts_to_generate, max_retries
-                )
-
-                # Add to cache and results
-                for text, embedding in zip(texts_to_generate, new_embeddings):
-                    text_hash = hashlib.md5(text.encode()).hexdigest()
-                    if len(self.embedding_cache.cache) < self.embedding_cache.max_size:
-                        self.embedding_cache.cache[text_hash] = embedding
-                    self.embedding_cache.misses += 1
-                    batch_embeddings.append(embedding)
-
-            all_embeddings.extend(batch_embeddings)
-
-            # Delay between batches to be gentle on the API
-            if i + embedding_batch_size < len(all_texts) and texts_to_generate:
-                time.sleep(batch_delay)
-
-        # Remove duplicates based on embedding similarity (if enabled)
-        if self.config["processing"].get("deduplication_enabled", True):
-            print("🔍 Running deduplication analysis...")
-            similarity_threshold = self.config["processing"].get(
-                "similarity_threshold", 0.95
-            )
-            unique_chunks, unique_embeddings = self._remove_duplicates(
-                chunks, all_embeddings, similarity_threshold=similarity_threshold
-            )
-        else:
-            print("ℹ️  Deduplication disabled - using all chunks")
-            unique_chunks, unique_embeddings = chunks, all_embeddings
-
-        if not unique_chunks:
-            print("❌ No unique chunks remaining after deduplication!")
-            return
-
-        # Process unique chunks in batches for upload
-        batch_size = 10
-        collection_name = self.config["qdrant"]["collection_name"]
-        total_batches = (len(unique_chunks) + batch_size - 1) // batch_size
-
-        print(
-            f"🚀 Starting batch upload: {total_batches} batches of {batch_size} chunks each"
-        )
-
-        successful_uploads = 0
-
-        for i in range(0, len(unique_chunks), batch_size):
-            batch_num = i // batch_size + 1
-            batch_chunks = unique_chunks[i : i + batch_size]
-            batch_embeddings = unique_embeddings[i : i + batch_size]
-
-            try:
-                # Create points for Qdrant
-                points = []
-                for j, (chunk, embedding) in enumerate(
-                    zip(batch_chunks, batch_embeddings)
-                ):
-                    # Generate deterministic ID for chunk
-                    chunk_index = i + j
-                    # Get file path from metadata for consistent ID generation
-                    file_path = chunk.metadata.get("source", "unknown")
-                    point_id = self._generate_chunk_id(
-                        chunk.page_content, chunk_index, repo_name, file_path
-                    )
-
-                    # Debug: Log first 100 chars of content and generated ID
-                    if j == 0 and i == 0:  # Only log first chunk of first batch
-                        content_preview = chunk.page_content[:100].replace("\n", " ")
-                        print(f"   🔍 Debug - First chunk ID: {point_id[:8]}...")
-                        print(f"   🔍 Debug - Content preview: {content_preview}...")
-                        print(f"   🔍 Debug - Source: {file_path}")
-
-                    # Use new optimized payload creation
-                    payload = create_payload(
-                        chunk=chunk,
-                        config=self.config,
-                        chunk_index=chunk_index,
-                        repo_name=repo_name,
-                        file_path=file_path,
-                    )
-
-                    # Handle named vectors vs default vectors
-                    vector_name = self.config["qdrant"].get("vector_name")
-                    if vector_name:
-                        # Use named vectors - create dict for named vectors
-                        points.append(
-                            PointStruct(
-                                id=point_id,
-                                vector={vector_name: embedding},
-                                payload=payload,
-                            )
-                        )
-                    else:
-                        # Use default vectors - pass embedding directly
-                        points.append(
-                            PointStruct(id=point_id, vector=embedding, payload=payload)
-                        )
-
-                # Upload batch to Qdrant
-                self.qdrant_client.upsert(
-                    collection_name=collection_name, points=points
-                )
-
-                successful_uploads += len(batch_chunks)
-                print(
-                    f"  ✅ Uploaded batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)"
-                )
-
-                # Debug: Log all unique point IDs to help track duplicates
-                if batch_num == 1:  # Log IDs from first batch
-                    print("   🔍 Debug - First batch point IDs:")
-                    for point in points[:3]:  # Show first 3 IDs
-                        print(f"      - {point.id[:16]}...")
-
-                # Show progress every 20 batches or at the end (less verbose)
-                if batch_num % 20 == 0 or batch_num == total_batches:
-                    progress = (successful_uploads / len(unique_chunks)) * 100
-                    print(
-                        f"  📊 Progress: {progress:.0f}% ({successful_uploads}/{len(unique_chunks)} unique chunks)"
-                    )
-
-            except Exception as e:
-                print(f"  ❌ Failed to upload batch {batch_num}: {e}")
-                continue
-
-        original_count = len(chunks)
-        duplicate_count = original_count - len(unique_chunks)
-        print(
-            f"🎉 Successfully uploaded {successful_uploads}/{len(unique_chunks)} unique chunks to Qdrant collection '{collection_name}'"
-        )
-        if duplicate_count > 0:
-            print(
-                f"   📊 Deduplication stats: {duplicate_count} duplicates removed from {original_count} original chunks"
-            )
-
-        # Display cache statistics
-        cache_stats = self.embedding_cache.get_stats()
-        if cache_stats["hits"] > 0 or cache_stats["misses"] > 0:
-            print(
-                f"   💾 Cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses "
-                f"({cache_stats['hit_rate']} hit rate)"
-            )
+        return self._upload_chunks(chunks, repo_name, file_aware_ids=False)
 
     def _process_and_upload_documents_with_stats(
         self, combined_content: str, repo_name: str
@@ -2945,29 +3015,8 @@ class GitHubToQdrantProcessor:
         Returns:
             Number of chunks successfully uploaded
         """
-        self._process_and_upload_documents(combined_content, repo_name)
-
-        # Return chunk count (we'll track this in the upload process)
-        # For now, split and count chunks
-        document = Document(
-            page_content=combined_content,
-            metadata={
-                "source": self.config["github"].get("repository_url", ""),
-                "repository": repo_name,
-                "name": self.config["github"].get("name", ""),
-                "url": "",
-                "branch": self.config["github"].get("branch", "default"),
-            },
-        )
-        chunks = self.text_splitter.split_documents([document])
-
-        # Account for deduplication if enabled
-        if self.config["processing"].get("deduplication_enabled", True):
-            # Estimate unique chunks based on typical deduplication ratio
-            # This is an approximation since we don't track the exact count in the current method
-            return int(len(chunks) * 0.9)  # Assume 10% duplicates on average
-        else:
-            return len(chunks)
+        stats = self._process_and_upload_documents(combined_content, repo_name)
+        return stats.uploaded_chunks
 
     def process_repository_with_override(
         self,

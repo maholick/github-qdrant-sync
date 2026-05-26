@@ -64,11 +64,32 @@ qdrant:
   distance: Cosine  # Options: Cosine, Euclidean, Dot
   vector_name: null  # null for unnamed vectors, "model-name" for named vectors
   recreate_collection: false  # WARNING: true will delete existing collection!
+  upload_batch_size: 64
   
   # Connection method (auto-detected if not specified)
   # Options: auto, reverse_proxy, direct, url
   connection_method: auto
   timeout: 30
+  cloud_inference: false  # Set true for Qdrant Cloud/server Document inference
+  # local_inference_batch_size: 8  # Optional FastEmbed local inference batch size
+
+  # Qdrant 1.18+ TurboQuant (optional)
+  # Requires Qdrant server/Cloud 1.18+ and qdrant-client 1.18+.
+  # Recommended first trial: bits4 (8x compression) on a test collection.
+  quantization:
+    enabled: false
+    method: turbo
+    bits: bits4  # Options: bits4, bits2, bits1_5, bits1
+    always_ram: true
+    apply_to_existing_collections: false
+
+  # Optional sparse BM25 vector for hybrid dense+sparse retrieval.
+  # Requires named dense vectors (`vector_name: dense`, for example).
+  # Also requires cloud_inference: true or qdrant-client[fastembed] for local inference.
+  sparse_vector:
+    enabled: false
+    name: sparse
+    model: qdrant/bm25
 
   # Payload indexing (optional, recommended for large collections)
   #
@@ -273,6 +294,10 @@ output:
 # Payload Configuration
 # ============================================================
 payload:
+  # Metadata structure (v0.5 canonical location)
+  # Options: "nested" (LangChain default) or "flat" (direct Qdrant filtering)
+  metadata_structure: "nested"
+
   # Content field names - list all fields that should contain the document text
   # Configure based on your integration needs:
   # - content: Required for n8n
@@ -308,6 +333,8 @@ payload:
 # Retrieval (optional CLI helper)
 # ============================================================
 retrieval:
+  mode: dense  # Options: dense, hybrid
+  fusion: rrf  # Hybrid mode only. Options: rrf, dbsf
   top_k: 10
   fetch_k: 40
   max_chunks_per_file: 3
@@ -315,12 +342,6 @@ retrieval:
   # Optional filters by metadata fields (use logical names; code will map to metadata.<field> if nested)
   # filters:
   #   repository: your-repo-name
-
-  # Metadata structure (NEW in v0.3.4)
-  # Options: "nested" (LangChain default) or "flat" (v0.3.2 behavior)
-  # - nested: All metadata fields grouped under "metadata" key (recommended for LangChain compatibility)
-  # - flat: All fields at root level (better for direct Qdrant filtering)
-  metadata_structure: "nested"
 
 # ============================================================
 # Logging Configuration
