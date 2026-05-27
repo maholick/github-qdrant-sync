@@ -1,0 +1,39 @@
+version: 1
+thresholds:
+  pass_rate: 0.8
+  expected_source_top_k: 5
+  min_top_score: 0.4
+  min_keyword_coverage: 0.5
+
+cases:
+  - id: config-authentication
+    query: How do I configure authentication and API keys?
+    expected_sources:
+      - README
+      - config
+      - .env
+    keywords:
+      - authentication
+      - api
+      - key
+      - config
+
+  - id: qdrant-configuration
+    query: How is the Qdrant collection configured?
+    expected_sources:
+      - config.yaml.example
+      - README
+    keywords:
+      - qdrant
+      - collection
+      - vector
+
+  - id: retrieval-quality
+    query: How can I check retrieval quality?
+    expected_sources:
+      - README
+      - eval.yaml
+    keywords:
+      - benchmark
+      - doctor
+      - quality

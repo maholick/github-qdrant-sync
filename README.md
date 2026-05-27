@@ -3,6 +3,7 @@
 **High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and 150+ text file types into searchable vector databases for AI applications. Now with multi-repository batch processing, multiple embedding providers, and state-of-the-art deduplication algorithms.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-0A7CFF.svg)](#)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -20,6 +21,9 @@ This project automatically processes GitHub repositories containing documentatio
 - 📊 **Real-time Progress**: Detailed processing reports with summary statistics
 - 🛡️ **Production Ready**: Error handling, rate limiting, retry logic
 - 🎛️ **Highly Configurable**: YAML configs with environment variable support
+- 🧭 **CLI + TUI**: Script-compatible commands plus a fixed-pane Textual terminal UI
+- 🩺 **Doctor & Benchmark**: Check collection health, compatibility, and retrieval quality
+- 🧊 **TurboQuant Ready**: Optional Qdrant TurboQuant config for supported clusters
 - 📚 **150+ File Types**: Process code, docs, configs, PDFs, and more
 - 📄 **Individual File Processing**: Maintain document boundaries for better search (v0.3.3)
 - 🔒 **Deterministic IDs**: Consistent vector IDs across runs prevent duplicates (v0.3.3)
@@ -47,7 +51,8 @@ git clone <your-repo-url>
 cd github-qdrant-sync
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .
+github-qdrant-sync --version
 ```
 
 ### 2. Configure API Keys
@@ -67,13 +72,59 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
+Or use the interactive config wizard:
+
+```bash
+github-qdrant-sync wizard --output config.yaml
+github-qdrant-sync validate-config config.yaml
+```
+
+If the target config file already exists, the wizard asks whether to overwrite it.
+Answer `n` to choose a different filename such as `config.local.yaml`.
+
 ### 4. Run
 
 ```bash
-python github_to_qdrant.py config.yaml
+github-qdrant-sync ingest config.yaml
 ```
 
 ## 🛠️ Installation & Dependencies
+
+### Installation Manual
+
+Use the editable install during local development so the `github-qdrant-sync`
+command always points at your checkout:
+
+```bash
+git clone https://github.com/maholick/github-qdrant-sync.git
+cd github-qdrant-sync
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e .
+github-qdrant-sync --version
+```
+
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/maholick/github-qdrant-sync.git
+cd github-qdrant-sync
+py -3.9 -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e .
+github-qdrant-sync --version
+```
+
+For script-only usage without installing the console command, install the
+requirements and call the original Python files directly:
+
+```bash
+pip install -r requirements.txt
+python github_to_qdrant.py config.yaml
+python rag_retrieval.py config.yaml --query "How do I configure authentication?"
+```
 
 ### System Requirements
 
@@ -92,6 +143,7 @@ pip install -r requirements.txt
 - `qdrant-client>=1.18.0` - Vector database client with TurboQuant support
 - `openai` - Azure OpenAI embeddings
 - `numpy` - Vectorized operations
+- `typer`, `rich`, and `textual` - Modern commands, output, and terminal UI
 - `mistralai` - Mistral AI embeddings
 - `sentence-transformers` - Local embedding models (optional)
 
@@ -154,6 +206,12 @@ mistral_ai:
   model: codestral-embed  # or mistral-embed
   output_dimension: 3072
 
+answering:
+  provider: mistral_ai
+  model: mistral-large-2512
+  temperature: 0.2
+  max_context_chars: 12000
+
 qdrant:
   vector_size: 3072
 ```
@@ -205,7 +263,11 @@ payload:
 
 ### 🧩 Qdrant 1.18+ Options
 
-TurboQuant is opt-in and requires Qdrant server or Cloud 1.18+ plus `qdrant-client>=1.18.0`. Start with `bits4` on a test collection before enabling it for production data. Sparse BM25 vectors use Qdrant `Document` inference; set `qdrant.cloud_inference: true` for Qdrant Cloud/server inference or install `qdrant-client[fastembed]` for local inference.
+TurboQuant is opt-in and requires Qdrant server or Cloud 1.18+ plus
+`qdrant-client>=1.18.0`. Start with `bits4` on a test collection before
+enabling it for production data. Sparse BM25 vectors use Qdrant `Document`
+inference; set `qdrant.cloud_inference: true` for Qdrant Cloud/server
+inference or install `qdrant-client[fastembed]` for local inference.
 
 ```yaml
 qdrant:
@@ -218,6 +280,10 @@ qdrant:
     bits: bits4       # bits4, bits2, bits1_5, or bits1
     always_ram: true
     apply_to_existing_collections: false
+    search:
+      ignore: false
+      rescore: true
+      oversampling: 2.0
 
   sparse_vector:
     enabled: false
@@ -225,17 +291,45 @@ qdrant:
     model: qdrant/bm25
 ```
 
-Other recent Qdrant features are mainly operational wins for this project: 1.18 adds memory monitoring, per-collection metrics, strict-mode guardrails, audit-log querying, and in-place named-vector schema changes; 1.17 improves write-load search latency and observability; 1.16 improves filtered search and disk-efficient storage. Hybrid retrieval and TurboQuant are the pieces wired into this repo because they directly affect ingestion and RAG quality.
+When `enabled` is true, new collections are created with TurboQuant. Existing
+collections are left unchanged unless `apply_to_existing_collections: true` is
+set. Search commands pass `qdrant.quantization.search` to Qdrant so you can
+disable quantized search temporarily (`ignore: true`) or increase
+`oversampling` for quality-sensitive queries.
+
+TurboQuant settings are index-affecting. After changing `enabled`, `method`,
+`bits`, `always_ram`, or the collection/vector settings, run:
+
+```bash
+github-qdrant-sync collections config.yaml --check-qdrant
+github-qdrant-sync doctor config.yaml
+github-qdrant-sync benchmark config.yaml --cases eval.yaml
+```
+
+In the TUI, use `/config`, `/set qdrant.quantization.enabled true`, and related
+`qdrant.quantization.*` paths to stage and validate these settings before
+saving.
+
+Other recent Qdrant features are mainly operational wins for this project: 1.18
+adds memory monitoring, per-collection metrics, strict-mode guardrails,
+audit-log querying, and in-place named-vector schema changes; 1.17 improves
+write-load search latency and observability; 1.16 improves filtered search and
+disk-efficient storage. Hybrid retrieval and TurboQuant are the pieces wired
+into this repo because they directly affect ingestion and RAG quality.
 
 ## 🚀 Usage Examples
 
 ### Basic Usage
 ```bash
 # Process with default config
-python github_to_qdrant.py config.yaml
+github-qdrant-sync ingest config.yaml
 
 # Process different repository
-python github_to_qdrant.py config.yaml --repo-url https://github.com/other/repo.git
+github-qdrant-sync ingest config.yaml --repo-url https://github.com/other/repo.git
+
+# Legacy script usage remains supported
+python github_to_qdrant.py config.yaml
+python rag_retrieval.py config.yaml --query "How do I configure authentication?"
 ```
 
 ### 🔄 Multi-Repository Processing (New!)
@@ -244,7 +338,7 @@ Process multiple repositories sequentially with a single command:
 
 ```bash
 # Process multiple repositories from a list file
-python github_to_qdrant.py config.yaml --repo-list repositories.yaml
+github-qdrant-sync ingest config.yaml --repo-list repositories.yaml
 ```
 
 **Repository List File Format (`repositories.yaml`):**
@@ -280,6 +374,7 @@ repositories:
 - ✅ Continues processing if one repository fails
 - ✅ Comprehensive summary report at the end
 - ✅ All global settings from `config.yaml` apply
+- ✅ The same `repositories.yaml` can be reused for multi-collection search and answers
 
 **Example Output:**
 ```
@@ -335,6 +430,273 @@ Query your vector database using the included retrieval CLI:
 
 **Basic Query:**
 ```bash
+github-qdrant-sync query config.yaml --query "How do I configure authentication?"
+```
+
+By default, `query` and `ask` search `qdrant.collection_name` from the config.
+If you ingested multiple repositories with `repositories.yaml`, pass that same
+file to search all listed collections and merge the best matches:
+
+```bash
+github-qdrant-sync query config.yaml \
+  --repo-list repositories.yaml \
+  --query "How do I configure authentication?"
+
+github-qdrant-sync ask config.yaml \
+  --repo-list repositories.yaml \
+  --question "How do I configure authentication?"
+```
+
+To narrow retrieval to one collection, use `--collection`. This works by itself
+or together with `--repo-list`:
+
+```bash
+github-qdrant-sync query config.yaml \
+  --collection openai-python-docs \
+  --query "How do I configure authentication?"
+
+github-qdrant-sync ask config.yaml \
+  --repo-list repositories.yaml \
+  --collection langchain-docs \
+  --question "How do I configure callbacks?"
+```
+
+You can inspect the collections known to a config or repo list:
+
+```bash
+github-qdrant-sync collections config.yaml
+github-qdrant-sync collections config.yaml --repo-list repositories.yaml
+github-qdrant-sync collections config.yaml --repo-list repositories.yaml --check-qdrant
+```
+
+With `--check-qdrant`, the collection list verifies whether each collection is
+usable with the active embedding config. Collections embedded with a different
+provider, model, vector size, distance metric, or vector name are shown as
+unusable instead of being queried accidentally.
+
+By default, query results render with a compact Rich brand header, transient
+search spinner, Vector Search summary, and ranked source table. Use
+`--format text` for plain terminal output, `--format json` for scripts, or
+`--no-banner` when you want the Rich table without the decorative header.
+
+To generate an AI answer from retrieved context, use `ask`:
+
+```bash
+github-qdrant-sync ask config.yaml --question "How do I configure authentication?"
+```
+
+The `ask` command uses `answering.provider` and `answering.model`. Supported
+answer providers are `mistral_ai` and `azure_openai`; `sentence_transformers`
+remains retrieval-only because it does not provide a chat model.
+
+Before `query` or `ask` runs, the CLI checks the selected collections against
+the active embedding configuration. Compatible collections are searched,
+incompatible collections are skipped with a clear reason, and the command fails
+only when no selected collection is usable. If an older collection has matching
+vector settings but lacks embedding metadata, retrieval continues with a
+warning.
+
+### 🖥️ Terminal UI
+
+For repeated asking, searching, validation, and scoped collection changes, run
+the CLI without arguments or use `interactive`. Both forms open the Textual
+terminal UI on normal TTY terminals and use `config.yaml`, `config.yml`, or
+`config.json` from the current directory when no config path is provided:
+
+```bash
+github-qdrant-sync
+github-qdrant-sync interactive
+github-qdrant-sync interactive config.yaml
+github-qdrant-sync interactive config.yaml --repo-list repositories.yaml
+```
+
+The terminal UI keeps the app header, current output, sources table,
+collections table, activity/progress area, and command input in fixed regions
+instead of appending a new menu after every action. Long-running operations run
+in the background, animate the activity pane with the current phase, then leave
+the final result on screen.
+
+On first start, if no `config.yaml`, `config.yml`, or `config.json` exists and
+the terminal supports Textual, `github-qdrant-sync` opens the TUI setup wizard
+instead of failing with a missing-config error. The wizard creates `config.yaml`
+by default, uses environment-variable placeholders for secrets, validates the
+generated config, and then leaves you in the TUI. Non-TTY runs and
+`interactive --classic` keep the script-friendly error and can use:
+
+```bash
+github-qdrant-sync wizard --output config.yaml
+```
+
+Typing `/` in the command input opens a grouped command palette. The palette is
+organized by workflow so the command list stays readable as the CLI grows:
+
+- **Search & Ask**: `/ask`, `/search`, `/limit`, `/parent`
+- **Collections**: `/collections`, `/scope`, `/repo-list`
+- **Config**: `/config`, `/get`, `/set`, `/secret`, `/changes`, `/save-config`
+- **Quality**: `/doctor`, `/benchmark`, `/improve`, `/validate`
+- **Ingest**: `/ingest config`, `/ingest repo-url`, `/ingest repo-list`
+- **Session**: `/clear`, `/help`, `/quit`
+
+Use category help to drill into one group:
+
+```text
+/help search
+/help collections
+/help config
+/help quality
+/help ingest
+/help session
+```
+
+Common commands inside the TUI:
+
+```text
+/ask How do I configure authentication?
+/search auth middleware
+/collections
+/scope all
+/scope openai-python-docs
+/config config.local.yaml
+/load-config configs/support.yaml
+/repo-list repositories.yaml
+/repo-list clear
+/config
+/get qdrant.collection_name
+/set retrieval.top_k 5
+/secret qdrant.api_key QDRANT_API_KEY
+/changes
+/save-config
+/save-config --confirm
+/save-config-as config.local.yaml --confirm
+/discard-config-changes
+/doctor
+/benchmark
+/benchmark eval.yaml
+/improve
+/improve eval.yaml --apply
+/limit 5
+/parent on
+/validate
+/ingest config
+/ingest repo-url https://github.com/example/project.git
+/ingest repo-list repositories.yaml
+/help
+/quit
+```
+
+Continue typing after `/`, for example `/ben` or `/sec`, to filter grouped
+commands before submitting one.
+
+When `--repo-list repositories.yaml` is provided, the initial scope is all
+collections listed in that file. Use `/scope COLLECTION` to narrow to one
+collection or `/scope all` to return to merged multi-collection retrieval. If no
+repository list is loaded, `/scope all` simply resets to the config default
+collection. Use `/config PATH` to switch config files without restarting the UI.
+The collections pane is updated after search, ask, doctor, benchmark, and
+`/collections` so unusable collections remain visible with their status and
+reason.
+
+The TUI also supports safe config editing. `/config` shows the editable config
+summary, `/set` stages non-secret values, and `/secret` writes env-var
+placeholders like `${QDRANT_API_KEY}` instead of raw keys. Unsaved changes are
+used immediately by TUI search/answer/validation through a temporary config
+file, but the real config is only written after `/save-config --confirm`.
+Saving validates first, blocks errors, and creates a timestamped `.bak` backup.
+Index-affecting edits such as embedding provider, dimensions, vector size,
+distance, vector name, and collection name are marked because they may require
+reingestion.
+
+### 🩺 Retrieval Quality Loop
+
+The CLI includes a safe quality loop for checking index health and measuring
+retrieval quality before changing ingestion settings:
+
+```bash
+github-qdrant-sync doctor config.yaml --repo-list repositories.yaml
+github-qdrant-sync benchmark config.yaml --repo-list repositories.yaml
+github-qdrant-sync benchmark config.yaml --cases eval.yaml --repo-list repositories.yaml
+github-qdrant-sync improve config.yaml --repo-list repositories.yaml
+github-qdrant-sync improve config.yaml --cases eval.yaml --repo-list repositories.yaml
+```
+
+`doctor` checks whether selected collections exist, contain points, match the
+configured vector size/distance/vector name, expose expected payload fields, and
+have configured payload indexes. It also checks sampled payload metadata for
+embedding provider/model compatibility. Missing payload indexes can be created
+idempotently:
+
+```bash
+github-qdrant-sync doctor config.yaml --apply-indexes --yes
+```
+
+`benchmark` uses explicit YAML cases so quality checks are reproducible. If
+`--cases` is omitted, the CLI looks for `eval.yaml` and then `eval.yml` in the
+current directory and next to the config file. This repository includes a
+starter `eval.yaml`; edit the queries, expected sources, and keywords so they
+match your indexed repositories:
+
+```yaml
+version: 1
+thresholds:
+  pass_rate: 0.8
+  expected_source_top_k: 5
+  min_top_score: 0.4
+  min_keyword_coverage: 0.5
+
+cases:
+  - id: sso
+    query: sso
+    collection: veviad_app
+    expected_sources:
+      - app/Http/Controllers/Auth/Sso
+      - resources/js/Pages/Admin/Integrations
+    keywords:
+      - sso
+      - authentication
+```
+
+`improve` produces a conservative action report. It can safely tune retrieval
+settings and configure payload indexes with explicit confirmation:
+
+```bash
+github-qdrant-sync improve config.yaml --apply --yes
+```
+
+The improvement flow never recreates collections, changes embedding dimensions,
+or reingests automatically. Those actions are reported as follow-up decisions
+because they can be destructive or expensive.
+
+If `doctor`, `benchmark`, or `ask` reports an embedding mismatch, reingest that
+repository with the active config or switch to the config that originally
+created the collection. The CLI will not mix sources embedded with different
+embedding models in one answer.
+
+Vector scores are raw Qdrant similarity values, not percentages. Short acronym
+queries such as `sso` may have useful results even when scores look lower than
+human-friendly percentages, so benchmark pass/fail combines source rank, keyword
+coverage, score floor, and aggregate pass rate.
+
+The classic prompt-loop menu is still available for simple terminals or muscle
+memory:
+
+```bash
+github-qdrant-sync interactive --classic
+github-qdrant-sync interactive --no-tui
+```
+
+Non-TTY output and `TERM=dumb` automatically use the classic mode. One-shot
+commands such as `query`, `ask`, `ingest`, `collections`, and `validate-config`
+remain the best interface for scripts and automation.
+
+`query` is the retrieval/evidence command: it shows matched snippets. `ask` is
+the answer command: it retrieves snippets first, then uses the configured chat
+provider to generate a grounded answer with sources.
+
+The legacy script interfaces remain available for automation that already calls
+the original files directly:
+
+```bash
+python github_to_qdrant.py config.yaml --repo-list repositories.yaml
 python rag_retrieval.py config.yaml --query "How do I configure authentication?"
 ```
 
@@ -371,18 +733,21 @@ Hybrid mode stores a named dense vector and a sparse BM25 vector per chunk, then
 
 **JSON Output (for programmatic use):**
 ```bash
-python rag_retrieval.py config.yaml --query "setup guide" --format json
+github-qdrant-sync query config.yaml --query "setup guide" --format json
 ```
 
 **Verbose Logging:**
 ```bash
-python rag_retrieval.py config.yaml --query "api reference" --verbose
+github-qdrant-sync query config.yaml --query "api reference" --verbose
 ```
 
 **Features:**
 - ✅ **Smart Grouping**: Caps results per file for better context diversity
+- ✅ **Multi-Collection Retrieval**: Search all collections from `repositories.yaml`
+- ✅ **Collection Selection**: Override the config default with `--collection`
 - ✅ **Parent Window Expansion**: Retrieve surrounding context around matched chunks
-- ✅ **Multiple Output Formats**: Human-readable text or machine-readable JSON
+- ✅ **Multiple Output Formats**: Rich terminal UI, plain text, or machine-readable JSON
+- ✅ **Polished Terminal UX**: Width-safe panels, grouped help, and optional banner suppression
 - ✅ **Flexible Filtering**: Filter by repository, file type, or any metadata field
 - ✅ **Marker Exclusion**: Internal incremental-sync markers are hidden by default
 - ✅ **Hybrid Search**: Optional dense+sparse retrieval for better keyword recall
@@ -428,7 +793,10 @@ retrieval:
 **CLI Arguments:**
 - `--query`: Your search query (required)
 - `--limit`: Override config's top_k
-- `--format`: Output format (text or json)
+- `--collection`: Search one Qdrant collection instead of the config default
+- `--repo-list`: Search all collections listed in `repositories.yaml`
+- `--format`: Output format (rich, text, or json)
+- `--no-banner`: Hide the decorative brand header
 - `--with-parent-window`: Enable context expansion
 - `--verbose` / `-v`: Enable debug logging
 - `--quiet` / `-q`: Suppress info messages
@@ -501,6 +869,21 @@ mistral_ai:
   api_key: ${MISTRAL_API_KEY}
   model: codestral-embed
   output_dimension: 3072
+
+answering:
+  provider: mistral_ai
+  model: mistral-large-2512
+  temperature: 0.2
+  max_context_chars: 12000
+```
+
+**Use Azure OpenAI for answers:**
+```yaml
+answering:
+  provider: azure_openai
+  model: ${AZURE_OPENAI_CHAT_DEPLOYMENT}
+  temperature: 0.2
+  max_context_chars: 12000
 ```
 
 **Use Local Models:**
@@ -680,13 +1063,18 @@ This prevents accidental cross-repo deletes when different repos contain the sam
 ```
 github-qdrant-sync/
 ├── github_to_qdrant.py      # 🌟 Main processing script
+├── github_qdrant_cli.py     # 🖥️ Typer/Rich command-line interface
+├── github_qdrant_tui.py     # 🧭 Textual fixed-pane terminal UI
+├── rag_retrieval.py         # 🔍 Retrieval and semantic search helpers
 ├── pdf_processor.py         # 📑 Advanced PDF processing module
 ├── config.yaml.example      # 📝 Configuration template with docs
 ├── config.yaml              # 🔧 Your configuration (gitignored)
+├── eval.yaml                # 🧪 Starter benchmark cases
 ├── repositories.yaml.example # 📋 Multi-repo list template
 ├── repositories.yaml        # 📋 Your repository list (gitignored)
 ├── .env.example             # 🔐 Environment variables template
 ├── .env                     # 🔑 Your API keys (gitignored)
+├── pyproject.toml           # 📦 Package metadata and CLI entrypoint
 ├── requirements.txt         # 📦 Python dependencies
 ├── .gitignore              # 🚫 Git exclusions
 ├── README.md               # 📖 This documentation
@@ -796,6 +1184,13 @@ python github_to_qdrant.py config.local.yaml
 - Monitor API usage and costs
 - Set up proper logging
 - Use dedicated service accounts
+- Prefer `/secret` in the TUI for API keys; it writes env-var placeholders
+  instead of raw values.
+- CLI/TUI errors, config summaries, and JSON metadata redact obvious secret
+  fields and tokenized GitHub URLs, but retrieved repository content is still
+  shown as indexed.
+- Unsaved TUI config edits are written to temporary files with owner-only
+  permissions and removed after backend commands finish.
 
 ## 🎯 Example Workflows
 
@@ -850,13 +1245,21 @@ echo "Vector database updated successfully"
 
 ## 📝 Changelog
 
-### v0.5.0 (2026-05-26) - Qdrant 1.18 & RAG Quality Modernization
+### v0.5.0 (2026-05-27) - Qdrant 1.18, CLI & TUI Modernization
 - ✨ **TurboQuant Support**: Optional Qdrant 1.18+ TurboQuant collection config
 - ✨ **Hybrid Retrieval**: Optional dense + sparse BM25 ingestion and RRF querying
+- ✨ **Typer/Rich CLI**: Installable `github-qdrant-sync` command with `ingest`, `query`, `ask`, `collections`, `doctor`, `benchmark`, `improve`, `interactive`, `validate-config`, and `wizard`
+- ✨ **Textual TUI**: Fixed-pane interactive terminal UI with slash commands, activity progress, source/collection panes, and first-run setup when no config exists
+- ✨ **AI Answers**: `ask` command builds grounded answers from retrieved chunks using configured Mistral AI or Azure OpenAI chat models
+- ✨ **Multi-Collection Retrieval**: Query, ask, benchmark, and interactive mode can search all collections listed in `repositories.yaml`
+- ✨ **Collection Compatibility Checks**: Skips missing or embedding-incompatible collections with explicit reasons instead of mixing incompatible sources
+- ✨ **Safe TUI Config Editing**: Inspect, stage, validate, save, save-as, and discard whitelisted config changes with secret redaction
+- ✨ **Quality Loop**: Added `doctor`, `benchmark`, and `improve` workflows plus starter `eval.yaml`
+- 📚 **Install Manual**: README now documents editable install, Windows setup, script-only usage, CLI, TUI, and release workflows
 - 🔧 **Shared Qdrant Config**: Ingestion and retrieval now share connection parsing
 - 🐛 **Metadata Config Fix**: `payload.metadata_structure` is canonical, with legacy fallback
 - 🐛 **Exclude Pattern Fixes**: Glob-aware excludes for paths like `*.pyc`
-- 🧪 **Unit Tests**: Added pytest coverage for config, payloads, Qdrant setup, and retrieval
+- 🧪 **Unit Tests**: Added pytest coverage for config, payloads, Qdrant setup, retrieval, CLI routing, TUI commands, quality checks, and setup flows
 
 ### v0.4.1 (2025-12-19) - Robustness & Reliability Improvements
 - 🐛 **Retrieval Fixes**: Fixed `fetch_k` defaults, collection existence checks, empty result guidance, and debug logging

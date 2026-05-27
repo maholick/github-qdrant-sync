@@ -1,3 +1,5 @@
+"""Test path setup for root-level modules."""
+
 import sys
 from pathlib import Path
 

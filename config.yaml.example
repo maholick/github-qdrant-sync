@@ -44,6 +44,22 @@ mistral_ai:
   api_base: https://api.mistral.ai/v1
 
 # ============================================================
+# Answer / Chat Model Configuration
+# ============================================================
+# Optional: used by AI answer flows that build a response from retrieved chunks.
+# Choose mistral_ai or azure_openai. Sentence Transformers is embedding-only.
+# Mistral reuses mistral_ai.api_key. Azure reuses azure_openai api settings, and
+# answering.model should be your Azure OpenAI chat deployment name.
+answering:
+  provider: mistral_ai
+  model: mistral-large-2512  # or ${AZURE_OPENAI_CHAT_DEPLOYMENT} for azure_openai
+  temperature: 0.2
+  max_context_chars: 12000
+  system_prompt: >
+    Answer using only the retrieved repository context. If the context is
+    insufficient, say what is missing and cite the closest matching sources.
+
+# ============================================================
 # Sentence Transformers (Local) Configuration
 # ============================================================
 sentence_transformers:
@@ -82,6 +98,10 @@ qdrant:
     bits: bits4  # Options: bits4, bits2, bits1_5, bits1
     always_ram: true
     apply_to_existing_collections: false
+    search:
+      ignore: false      # true bypasses quantized vectors during search
+      rescore: true      # rescore candidates with original vectors when possible
+      oversampling: 2.0  # preselect more candidates before rescoring
 
   # Optional sparse BM25 vector for hybrid dense+sparse retrieval.
   # Requires named dense vectors (`vector_name: dense`, for example).

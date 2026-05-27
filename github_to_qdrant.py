@@ -21,6 +21,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Protocol, Union
 from urllib.parse import urlparse
 
@@ -42,6 +43,39 @@ from pdf_processor import PDFProcessor
 
 # Type hints
 from dataclasses import dataclass
+
+
+TURBO_QUANT_BITS = {
+    "bits1": qdrant_models.TurboQuantBitSize.BITS1,
+    "bits1_5": qdrant_models.TurboQuantBitSize.BITS1_5,
+    "bits2": qdrant_models.TurboQuantBitSize.BITS2,
+    "bits4": qdrant_models.TurboQuantBitSize.BITS4,
+}
+
+
+def build_qdrant_quantization_config(
+    qdrant_config: Dict[str, Any],
+) -> Optional[qdrant_models.TurboQuantization]:
+    """Build optional Qdrant TurboQuant config from qdrant.quantization."""
+    quant_cfg = qdrant_config.get("quantization", {})
+    if not isinstance(quant_cfg, dict) or not quant_cfg.get("enabled", False):
+        return None
+
+    method = str(quant_cfg.get("method", "turbo")).strip().lower()
+    if method != "turbo":
+        raise ValueError("qdrant.quantization.method currently supports only 'turbo'")
+
+    bits = str(quant_cfg.get("bits", "bits4")).strip().lower()
+    if bits not in TURBO_QUANT_BITS:
+        allowed = ", ".join(sorted(TURBO_QUANT_BITS))
+        raise ValueError(f"qdrant.quantization.bits must be one of: {allowed}")
+
+    return qdrant_models.TurboQuantization(
+        turbo=qdrant_models.TurboQuantQuantizationConfig(
+            always_ram=bool(quant_cfg.get("always_ram", True)),
+            bits=TURBO_QUANT_BITS[bits],
+        )
+    )
 
 
 class EmbeddingInterface(Protocol):
@@ -494,6 +528,19 @@ class ConfigLoader:
     """
 
     @staticmethod
+    def load_env_for_config(config_path: str, quiet: bool = False) -> None:
+        """Load .env next to the config file, falling back to the cwd."""
+        config_env = Path(config_path).expanduser().resolve().parent / ".env"
+        if config_env.exists():
+            load_dotenv(config_env)
+            if not quiet:
+                print(f"📋 Loaded environment variables from: {config_env}")
+        elif os.path.exists(".env"):
+            load_dotenv(".env")
+            if not quiet:
+                print("📋 Loaded environment variables from .env file")
+
+    @staticmethod
     def load_config(config_path: str) -> Dict[str, Any]:
         """
         Load configuration from YAML file with environment variable support.
@@ -505,10 +552,7 @@ class ConfigLoader:
         Returns:
             Configuration dictionary with environment variables resolved
         """
-        # Load environment variables from .env file if it exists
-        if os.path.exists(".env"):
-            load_dotenv(".env")
-            print("📋 Loaded environment variables from .env file")
+        ConfigLoader.load_env_for_config(config_path)
 
         # Determine file format
         file_extension = os.path.splitext(config_path)[1].lower()
@@ -582,6 +626,7 @@ def create_qdrant_client_from_config(
     *,
     test_connection: bool = False,
     log_status: bool = False,
+    client_class: Any = QdrantClient,
 ) -> QdrantClient:
     """
     Create a Qdrant client from this project's config conventions.
@@ -641,7 +686,7 @@ def create_qdrant_client_from_config(
             attempts.append(
                 (
                     "reverse_proxy",
-                    lambda: QdrantClient(
+                    lambda: client_class(
                         host=hostname,
                         port=443,
                         https=True,
@@ -653,7 +698,7 @@ def create_qdrant_client_from_config(
         attempts.append(
             (
                 "direct",
-                lambda: QdrantClient(
+                lambda: client_class(
                     host=hostname,
                     port=port,
                     https=use_https,
@@ -665,7 +710,7 @@ def create_qdrant_client_from_config(
             attempts.append(
                 (
                     "url",
-                    lambda: QdrantClient(
+                    lambda: client_class(
                         url=url,
                         prefer_grpc=False,
                         **common_kwargs,
@@ -676,7 +721,7 @@ def create_qdrant_client_from_config(
         attempts.append(
             (
                 "reverse_proxy",
-                lambda: QdrantClient(
+                lambda: client_class(
                     host=hostname,
                     port=443,
                     https=True,
@@ -689,7 +734,7 @@ def create_qdrant_client_from_config(
         attempts.append(
             (
                 "direct",
-                lambda: QdrantClient(
+                lambda: client_class(
                     host=hostname,
                     port=port,
                     https=use_https,
@@ -703,7 +748,7 @@ def create_qdrant_client_from_config(
         attempts.append(
             (
                 "url",
-                lambda: QdrantClient(url=url, prefer_grpc=False, **common_kwargs),
+                lambda: client_class(url=url, prefer_grpc=False, **common_kwargs),
             )
         )
     else:
@@ -3431,13 +3476,43 @@ def signal_handler(_signum, _frame):
     sys.exit(130)  # Standard Unix exit code for SIGINT
 
 
-def main():
-    """Main entry point."""
+def run_ingest(
+    config_path: str,
+    repo_url: Optional[str] = None,
+    repo_list: Optional[str] = None,
+) -> int:
+    """Run ingestion for one repository or a repository list."""
     # Set up signal handler for clean interruption
     signal.signal(signal.SIGINT, signal_handler)
 
     # Load environment variables from .env file
     load_dotenv()
+
+    try:
+        processor = GitHubToQdrantProcessor(config_path)
+
+        # Check if repository list is provided
+        if repo_list:
+            # Process multiple repositories from list
+            process_repository_list(processor, repo_list)
+        else:
+            # Process single repository (current behavior)
+            processor.process_repository(repo_url)
+
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully without showing traceback
+        print("\n\n⚠️  Process interrupted by user (Ctrl+C)")
+        print("🧹 Cleaning up and exiting...")
+        return 130  # Standard Unix exit code for SIGINT
+    except Exception as e:
+        logging.error("Script failed: %s", e)
+        return 1
+
+    return 0
+
+
+def main():
+    """Main entry point."""
 
     parser = argparse.ArgumentParser(
         description="Process GitHub repository text files into Qdrant vector database"
@@ -3457,27 +3532,11 @@ def main():
 
     args = parser.parse_args()
 
-    try:
-        processor = GitHubToQdrantProcessor(args.config)
-
-        # Check if repository list is provided
-        if args.repo_list:
-            # Process multiple repositories from list
-            process_repository_list(processor, args.repo_list)
-        else:
-            # Process single repository (current behavior)
-            processor.process_repository(args.repo_url)
-
-    except KeyboardInterrupt:
-        # Handle Ctrl+C gracefully without showing traceback
-        print("\n\n⚠️  Process interrupted by user (Ctrl+C)")
-        print("🧹 Cleaning up and exiting...")
-        return 130  # Standard Unix exit code for SIGINT
-    except Exception as e:
-        logging.error("Script failed: %s", e)
-        return 1
-
-    return 0
+    return run_ingest(
+        config_path=args.config,
+        repo_url=args.repo_url,
+        repo_list=args.repo_list,
+    )
 
 
 if __name__ == "__main__":
