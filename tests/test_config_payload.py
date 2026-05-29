@@ -1,12 +1,15 @@
 import textwrap
+from pathlib import Path
 
 from langchain_core.documents import Document
 
 from github_to_qdrant import (
     ConfigLoader,
+    GitHubToQdrantProcessor,
     create_payload,
     get_metadata_structure,
     is_excluded_path,
+    is_likely_text_file,
 )
 
 
@@ -85,3 +88,41 @@ def test_exclude_patterns_support_globs_segments_and_paths(tmp_path):
     assert not is_excluded_path(
         str(root / "docs/node_modules-guide.md"), str(root), patterns
     )
+
+
+def test_likely_text_detection_rejects_binary_files(tmp_path):
+    text_file = tmp_path / "Dockerfile"
+    text_file.write_text("FROM python:3.12\nRUN echo hello\n", encoding="utf-8")
+    binary_file = tmp_path / "asset.bin"
+    binary_file.write_bytes(b"\x00\x01\x02PNG\x00")
+
+    assert is_likely_text_file(str(text_file))
+    assert not is_likely_text_file(str(binary_file))
+
+
+def test_all_text_mode_detects_unlisted_text_files(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Docs\n", encoding="utf-8")
+    (repo / "Dockerfile").write_text("FROM python:3.12\n", encoding="utf-8")
+    (repo / "asset.bin").write_bytes(b"\x00\x01\x02PNG\x00")
+    ignored = repo / "node_modules"
+    ignored.mkdir()
+    (ignored / "package.json").write_text('{"name": "ignored"}', encoding="utf-8")
+
+    processor = GitHubToQdrantProcessor.__new__(GitHubToQdrantProcessor)
+    processor.config = {
+        "processing": {
+            "file_mode": "all_text",
+            "text_extensions": [".md"],
+            "markdown_extensions": [".md"],
+            "exclude_patterns": ["node_modules"],
+        }
+    }
+
+    discovered = {
+        path.relative_to(repo).as_posix()
+        for path in map(Path, processor._find_text_files(str(repo)))
+    }
+
+    assert discovered == {"README.md", "Dockerfile"}

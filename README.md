@@ -3,7 +3,7 @@
 **High-performance document processing pipeline that transforms GitHub repositories containing markdown, PDFs, and 150+ text file types into searchable vector databases for AI applications. Now with multi-repository batch processing, multiple embedding providers, and state-of-the-art deduplication algorithms.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Version 0.5.0](https://img.shields.io/badge/version-0.5.0-0A7CFF.svg)](#)
+[![Version 0.5.1](https://img.shields.io/badge/version-0.5.1-0A7CFF.svg)](#)
 [![Qdrant](https://img.shields.io/badge/Vector_DB-Qdrant-red.svg)](https://qdrant.tech/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -248,6 +248,7 @@ processing:
   deduplication_enabled: true   # Enable smart deduplication
   similarity_threshold: 0.95    # Duplicate detection threshold
   file_mode: all_text          # Process all text files (or markdown_only)
+  detect_text_content: true     # Also include readable text files with unknown extensions
 
 # New in v0.3.2: Configurable payload fields
 payload:
@@ -513,8 +514,9 @@ github-qdrant-sync interactive config.yaml --repo-list repositories.yaml
 The terminal UI keeps the app header, current output, sources table,
 collections table, activity/progress area, and command input in fixed regions
 instead of appending a new menu after every action. Long-running operations run
-in the background, animate the activity pane with the current phase, then leave
-the final result on screen.
+in the background, animate the activity pane with the current phase, stream
+curated progress into the main output pane, then leave the final result on
+screen.
 
 On first start, if no `config.yaml`, `config.yml`, or `config.json` exists and
 the terminal supports Textual, `github-qdrant-sync` opens the TUI setup wizard
@@ -534,7 +536,7 @@ organized by workflow so the command list stays readable as the CLI grows:
 - **Collections**: `/collections`, `/scope`, `/repo-list`
 - **Config**: `/config`, `/get`, `/set`, `/secret`, `/changes`, `/save-config`
 - **Quality**: `/doctor`, `/benchmark`, `/improve`, `/validate`
-- **Ingest**: `/ingest config`, `/ingest repo-url`, `/ingest repo-list`
+- **Ingest**: `/ingest config`, `/ingest repo-url`, `/ingest repo-list`, `/pause`, `/resume`, `/stop`
 - **Session**: `/clear`, `/help`, `/quit`
 
 Use category help to drill into one group:
@@ -580,6 +582,9 @@ Common commands inside the TUI:
 /ingest config
 /ingest repo-url https://github.com/example/project.git
 /ingest repo-list repositories.yaml
+/pause
+/resume
+/stop
 /help
 /quit
 ```
@@ -595,6 +600,14 @@ collection. Use `/config PATH` to switch config files without restarting the UI.
 The collections pane is updated after search, ask, doctor, benchmark, and
 `/collections` so unusable collections remain visible with their status and
 reason.
+
+During TUI ingestion, the main pane shows a live ingestion dashboard with the
+current stage, repo/collection context, progress bars when totals are known, and
+a recent event timeline. The activity pane remains a compact heartbeat with
+elapsed time and the phase trail. Use `/pause` to pause at the next progress
+checkpoint, `/resume` to continue, and `/stop` to request cooperative
+cancellation without leaving the TUI. Long blocking backend calls such as
+`git clone` finish their current call before pause or stop can take effect.
 
 The TUI also supports safe config editing. `/config` shows the editable config
 summary, `/set` stages non-secret values, and `/secret` writes env-var
@@ -1244,6 +1257,15 @@ echo "Vector database updated successfully"
 - Upload to Qdrant: 1 minute
 
 ## 📝 Changelog
+
+### v0.5.1 (2026-05-30) - Live TUI Ingestion Progress
+- ✨ **Live Ingestion Dashboard**: TUI ingestion now streams curated progress into the main pane with current stage, repo/collection context, timeline, and progress bars when totals are known
+- ✨ **Pause/Resume/Stop Controls**: Added `/pause`, `/resume`, and `/stop` so long ingestions can be controlled without quitting the TUI
+- 🔍 **All-Text Detection**: `file_mode: all_text` now includes readable text files even when their extension/name is not listed, while still respecting exclude patterns
+- 🔧 **Cooperative Cancellation**: Ingestion progress callbacks can stop work cleanly with exit code `130`; signal handling remains main-thread safe for TUI workers
+- ⚡ **Faster TUI Startup**: CLI/TUI startup now lazy-loads heavy ingestion, retrieval, and quality modules so the terminal UI opens before LangChain/Qdrant/PDF imports are needed
+- 📚 **TUI Docs**: README now documents live ingestion progress and cooperative pause/stop behavior
+- 🧪 **Tests**: Added coverage for ingestion progress callbacks, cancellation, signal handling, TUI progress rendering, and controls
 
 ### v0.5.0 (2026-05-27) - Qdrant 1.18, CLI & TUI Modernization
 - ✨ **TurboQuant Support**: Optional Qdrant 1.18+ TurboQuant collection config

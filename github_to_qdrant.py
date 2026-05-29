@@ -18,11 +18,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Protocol, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Union
 from urllib.parse import urlparse
 
 import yaml
@@ -41,8 +43,26 @@ import tiktoken
 # Import PDF processor
 from pdf_processor import PDFProcessor
 
-# Type hints
-from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class IngestProgressEvent:
+    """Structured progress event emitted during repository ingestion."""
+
+    stage: str
+    message: str
+    current: Optional[int] = None
+    total: Optional[int] = None
+    percent: Optional[float] = None
+    level: str = "info"
+    repo: Optional[str] = None
+    collection: Optional[str] = None
+
+
+IngestProgressCallback = Callable[[IngestProgressEvent], None]
+
+
+class IngestCancelled(Exception):
+    """Raised by progress callbacks to cooperatively stop ingestion."""
 
 
 TURBO_QUANT_BITS = {
@@ -51,6 +71,7 @@ TURBO_QUANT_BITS = {
     "bits2": qdrant_models.TurboQuantBitSize.BITS2,
     "bits4": qdrant_models.TurboQuantBitSize.BITS4,
 }
+TEXT_DETECTION_SAMPLE_BYTES = 8192
 
 
 def build_qdrant_quantization_config(
@@ -346,6 +367,34 @@ def is_excluded_path(path: str, root: str, exclude_patterns: List[str]) -> bool:
             return True
 
     return False
+
+
+def is_likely_text_file(
+    path: str, sample_bytes: int = TEXT_DETECTION_SAMPLE_BYTES
+) -> bool:
+    """Return whether a file looks like readable text based on a small byte sample."""
+    try:
+        with open(path, "rb") as file_handle:
+            sample = file_handle.read(sample_bytes)
+    except OSError:
+        return False
+
+    if not sample:
+        return True
+    if b"\0" in sample:
+        return False
+
+    try:
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        pass
+
+    allowed_controls = {7, 8, 9, 10, 12, 13, 27}
+    control_bytes = sum(
+        1 for byte in sample if byte < 32 and byte not in allowed_controls
+    )
+    return (control_bytes / len(sample)) < 0.05
 
 
 def create_payload(
@@ -947,8 +996,14 @@ class GitHubToQdrantProcessor:
     - Folder-based document organization
     """
 
-    def __init__(self, config_path: str):
+    def __init__(
+        self,
+        config_path: str,
+        progress: Optional[IngestProgressCallback] = None,
+    ):
         """Initialize the processor with configuration."""
+        self.progress = progress
+        self._emit_progress("initialize", "Loading configuration")
         print("🚀 GitHub to Qdrant Vector Database Processor")
         print("=" * 60)
 
@@ -960,6 +1015,11 @@ class GitHubToQdrantProcessor:
         ]
 
         print(f"🎯 Target collection: {self.config['qdrant']['collection_name']}")
+        self._emit_progress(
+            "initialize",
+            f"Target collection: {self.config['qdrant']['collection_name']}",
+            collection=self.config["qdrant"]["collection_name"],
+        )
 
         # Initialize embedding cache
         self.embedding_cache = EmbeddingCache(max_size=500)
@@ -970,12 +1030,20 @@ class GitHubToQdrantProcessor:
         if provider == "mistral_ai":
             model_name = self.config["mistral_ai"]["model"]
             print(f"🤖 Using embedding provider: Mistral AI ({model_name})")
+            provider_label = "Mistral AI"
         elif provider == "sentence_transformers":
             model_name = self.config["sentence_transformers"]["model"]
             print(f"🤖 Using embedding provider: Sentence Transformers ({model_name})")
+            provider_label = "Sentence Transformers"
         else:
             model_name = self.config["azure_openai"]["model"]
             print(f"🤖 Using embedding provider: Azure OpenAI ({model_name})")
+            provider_label = "Azure OpenAI"
+        self._emit_progress(
+            "initialize",
+            f"Using {provider_label} embeddings ({model_name})",
+            collection=self.config["qdrant"]["collection_name"],
+        )
 
         print(f"📏 Embedding dimension: {self.config['qdrant']['vector_size']}")
 
@@ -988,6 +1056,7 @@ class GitHubToQdrantProcessor:
 
         # Initialize clients
         print("\n🔗 Initializing connections...")
+        self._emit_progress("connect", "Initializing embedding and Qdrant clients")
         self.embeddings = self._initialize_embeddings()
         self.qdrant_client = self._initialize_qdrant()
         self._test_connections()
@@ -1005,6 +1074,7 @@ class GitHubToQdrantProcessor:
                 breakpoint_threshold_amount=95,  # 95th percentile for semantic similarity
             )
             print("📝 Semantic text splitter configured with percentile threshold")
+            self._emit_progress("chunk", "Semantic text splitter configured")
         elif chunking_strategy in ("token_recursive", "token"):
             # Token-aware recursive splitter (uses tiktoken length function)
             encoding_name = self.config.get("processing", {}).get(
@@ -1032,6 +1102,7 @@ class GitHubToQdrantProcessor:
             print(
                 f"📝 Token-aware text splitter configured: {chunk_size_tokens} tokens/chunk with {chunk_overlap_tokens} overlap (encoding: {encoding_name})"
             )
+            self._emit_progress("chunk", "Token-aware text splitter configured")
         else:
             # Default to recursive character text splitter
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -1045,6 +1116,41 @@ class GitHubToQdrantProcessor:
             chunk_overlap = self.config["processing"]["chunk_overlap"]
             print(
                 f"📝 Text splitter configured: {chunk_size} chars/chunk with {chunk_overlap} overlap"
+            )
+            self._emit_progress("chunk", "Recursive text splitter configured")
+
+    def _emit_progress(
+        self,
+        stage: str,
+        message: str,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
+        percent: Optional[float] = None,
+        level: str = "info",
+        repo: Optional[str] = None,
+        collection: Optional[str] = None,
+    ) -> None:
+        """Emit a structured progress event if a callback is configured."""
+        progress = getattr(self, "progress", None)
+        if not callable(progress):
+            return
+        event = IngestProgressEvent(
+            stage=stage,
+            message=message,
+            current=current,
+            total=total,
+            percent=percent,
+            level=level,
+            repo=repo,
+            collection=collection,
+        )
+        try:
+            progress(event)  # pylint: disable=not-callable
+        except IngestCancelled:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive callback isolation
+            logging.getLogger(__name__).debug(
+                "Ingest progress callback failed: %s", exc
             )
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -1153,8 +1259,17 @@ class GitHubToQdrantProcessor:
             print(
                 f"✅ Connected to {provider_name}. Embedding dimension: {len(test_response)}"
             )
+            self._emit_progress(
+                "connect",
+                f"Connected to {provider_name}; embedding dimension {len(test_response)}",
+            )
         except Exception as e:
             print(f"❌ Failed to connect to {provider_name}: {e}")
+            self._emit_progress(
+                "connect",
+                f"Failed to connect to {provider_name}: {e}",
+                level="error",
+            )
             raise
 
         # Test Qdrant connection
@@ -1163,8 +1278,17 @@ class GitHubToQdrantProcessor:
             print(
                 f"✅ Connected to Qdrant. Found {len(collections.collections)} existing collections"
             )
+            self._emit_progress(
+                "connect",
+                f"Connected to Qdrant; found {len(collections.collections)} collections",
+            )
         except Exception as e:
             print(f"❌ Failed to connect to Qdrant: {e}")
+            self._emit_progress(
+                "connect",
+                f"Failed to connect to Qdrant: {e}",
+                level="error",
+            )
             raise
 
     def _extract_repo_name(self, repo_url: str) -> str:
@@ -1191,6 +1315,12 @@ class GitHubToQdrantProcessor:
             Path to cloned repository
         """
         print(f"\n📦 Cloning repository: {repo_url}")
+        self._emit_progress(
+            "clone",
+            f"Cloning repository {repo_url}",
+            repo=repo_url,
+            collection=self.config["qdrant"].get("collection_name"),
+        )
 
         clone_path = os.path.join(temp_dir, "repo")
 
@@ -1237,9 +1367,23 @@ class GitHubToQdrantProcessor:
             print("⏳ Cloning in progress...")
             subprocess.run(cmd, capture_output=True, text=True, check=True)
             print("✅ Repository cloned successfully")
+            self._emit_progress(
+                "clone",
+                "Repository cloned successfully",
+                repo=repo_url,
+                collection=self.config["qdrant"].get("collection_name"),
+                level="success",
+            )
             return clone_path
         except subprocess.CalledProcessError as e:
             print(f"❌ Failed to clone repository: {e.stderr}")
+            self._emit_progress(
+                "clone",
+                f"Failed to clone repository: {e.stderr}",
+                repo=repo_url,
+                collection=self.config["qdrant"].get("collection_name"),
+                level="error",
+            )
             raise
 
     def _find_text_files(self, directory: str) -> List[str]:
@@ -1262,15 +1406,22 @@ class GitHubToQdrantProcessor:
 
         if file_mode == "all_text":
             print("\n🔍 Searching for all text-based files...")
+            self._emit_progress("scan", "Searching for all text-based files")
             extensions = self.config["processing"].get("text_extensions", [])
+            detect_text_content = self.config["processing"].get(
+                "detect_text_content", True
+            )
             # Also check for files without extensions that are commonly text files
             no_ext_names = [f for f in extensions if not f.startswith(".")]
         else:
             print("\n🔍 Searching for markdown files...")
+            self._emit_progress("scan", "Searching for markdown files")
             extensions = self.config["processing"]["markdown_extensions"]
+            detect_text_content = False
             no_ext_names = []
 
         text_files = []
+        content_detected_count = 0
         exclude_patterns = self.config["processing"]["exclude_patterns"]
 
         # Only show first 10 extensions for readability
@@ -1292,19 +1443,44 @@ class GitHubToQdrantProcessor:
             ]
 
             for file in files:
+                file_path = os.path.join(root, file)
+                if is_excluded_path(file_path, directory, exclude_patterns):
+                    continue
                 # Check if file has one of the specified extensions or matches no-extension names
-                if any(
+                matches_configured_text_file = any(
                     file.lower().endswith(ext)
                     for ext in extensions
                     if ext.startswith(".")
-                ) or (file in no_ext_names):
-                    file_path = os.path.join(root, file)
-                    # Check if file path contains any exclude patterns
-                    if not is_excluded_path(file_path, directory, exclude_patterns):
-                        text_files.append(file_path)
+                ) or (file in no_ext_names)
+                if matches_configured_text_file:
+                    text_files.append(file_path)
+                    continue
+                if detect_text_content and is_likely_text_file(file_path):
+                    content_detected_count += 1
+                    text_files.append(file_path)
 
         file_type = "text" if file_mode == "all_text" else "markdown"
-        print(f"✅ Found {len(text_files)} {file_type} files")
+        if content_detected_count:
+            print(
+                f"✅ Found {len(text_files)} eligible {file_type} files "
+                f"({content_detected_count} detected by content)"
+            )
+            progress_message = (
+                f"Found {len(text_files)} eligible {file_type} files after excludes; "
+                f"{content_detected_count} detected by content"
+            )
+        else:
+            print(f"✅ Found {len(text_files)} eligible {file_type} files")
+            progress_message = (
+                f"Found {len(text_files)} eligible {file_type} files after excludes"
+            )
+        self._emit_progress(
+            "scan",
+            progress_message,
+            current=len(text_files),
+            total=len(text_files),
+            level="success" if text_files else "warning",
+        )
         if len(text_files) > 0:
             print(f"📊 File size range: {self._get_file_size_stats(text_files)}")
         return text_files
@@ -1651,6 +1827,12 @@ class GitHubToQdrantProcessor:
             f"🔍 Checking for duplicates with similarity threshold: {similarity_threshold}"
         )
         print(f"📊 Processing {len(chunks)} chunks for deduplication...")
+        self._emit_progress(
+            "dedupe",
+            f"Checking {len(chunks)} chunks for duplicates",
+            current=0,
+            total=len(chunks),
+        )
 
         # Convert to numpy array for faster operations
         embeddings_np = np.array(embeddings)
@@ -1698,6 +1880,13 @@ class GitHubToQdrantProcessor:
                 print(
                     f"  📈 Similarity check progress: {progress:.1f}% ({processed_count}/{len(chunks) - len(exact_duplicates)})"
                 )
+                self._emit_progress(
+                    "dedupe",
+                    "Running semantic similarity checks",
+                    current=processed_count,
+                    total=len(chunks) - len(exact_duplicates),
+                    percent=progress,
+                )
 
             is_duplicate = False
 
@@ -1743,6 +1932,14 @@ class GitHubToQdrantProcessor:
         print(f"✅ Deduplication complete: {len(chunks)} → {len(unique_chunks)} chunks")
         print(
             f"   📊 Removed {len(exact_duplicates)} exact duplicates + {similarity_removed} similarity duplicates"
+        )
+        self._emit_progress(
+            "dedupe",
+            f"Deduplication complete: {len(unique_chunks)} unique chunks; {removed_count} removed",
+            current=len(chunks),
+            total=len(chunks),
+            percent=100.0,
+            level="success",
         )
 
         return unique_chunks, unique_embeddings
@@ -1919,6 +2116,12 @@ class GitHubToQdrantProcessor:
         """Generate embeddings for chunks with cache and retry handling."""
         print("🧠 Generating embeddings for all chunks (with rate limit protection)...")
         all_texts = [chunk.page_content for chunk in chunks]
+        self._emit_progress(
+            "embed",
+            f"Generating embeddings for {len(all_texts)} chunks",
+            current=0,
+            total=len(all_texts),
+        )
 
         embedding_batch_size = self.config["processing"].get("embedding_batch_size", 20)
         batch_delay = self.config["processing"].get("batch_delay_seconds", 1)
@@ -1938,6 +2141,12 @@ class GitHubToQdrantProcessor:
             print(
                 f"  🧠 Processing embedding batch {batch_num}/{total_embedding_batches} "
                 f"({len(batch_texts)} chunks)"
+            )
+            self._emit_progress(
+                "embed",
+                f"Embedding batch {batch_num}/{total_embedding_batches}",
+                current=batch_num,
+                total=total_embedding_batches,
             )
 
             batch_embeddings = []
@@ -1971,6 +2180,14 @@ class GitHubToQdrantProcessor:
                 time.sleep(batch_delay)
 
         self._validate_embeddings(chunks, all_embeddings)
+        self._emit_progress(
+            "embed",
+            f"Generated {len(all_embeddings)} embeddings",
+            current=len(all_embeddings),
+            total=len(all_texts),
+            percent=100.0,
+            level="success",
+        )
         return all_embeddings
 
     def _build_point_vector(self, chunk: Document, embedding: List[float]):
@@ -2021,6 +2238,13 @@ class GitHubToQdrantProcessor:
 
         print("\n🧠 Processing and uploading chunks to Qdrant...")
         print(f"📝 Processing {len(chunks)} chunks")
+        self._emit_progress(
+            "chunk",
+            f"Preparing {len(chunks)} chunks for upload",
+            current=0,
+            total=len(chunks),
+            collection=self.config["qdrant"].get("collection_name"),
+        )
 
         total_chars = sum(len(chunk.page_content) for chunk in chunks)
         avg_chunk_size = total_chars / len(chunks) if chunks else 0
@@ -2030,6 +2254,7 @@ class GitHubToQdrantProcessor:
 
         if self.config["processing"].get("deduplication_enabled", True):
             print("🔍 Running deduplication analysis...")
+            self._emit_progress("dedupe", "Running deduplication analysis")
             similarity_threshold = self.config["processing"].get(
                 "similarity_threshold", 0.95
             )
@@ -2038,10 +2263,20 @@ class GitHubToQdrantProcessor:
             )
         else:
             print("ℹ️  Deduplication disabled - using all chunks")
+            self._emit_progress(
+                "dedupe",
+                "Deduplication disabled; using all chunks",
+                level="warning",
+            )
             unique_chunks, unique_embeddings = chunks, all_embeddings
 
         if not unique_chunks:
             print("❌ No unique chunks remaining after deduplication!")
+            self._emit_progress(
+                "dedupe",
+                "No unique chunks remaining after deduplication",
+                level="error",
+            )
             return UploadStats(original_chunks=len(chunks))
 
         upload_batch_size = int(self.config["qdrant"].get("upload_batch_size", 64))
@@ -2053,6 +2288,13 @@ class GitHubToQdrantProcessor:
         print(
             f"🚀 Starting batch upload: {total_batches} batches of "
             f"{upload_batch_size} chunks each"
+        )
+        self._emit_progress(
+            "upload",
+            f"Uploading {len(unique_chunks)} unique chunks in {total_batches} batches",
+            current=0,
+            total=total_batches,
+            collection=collection_name,
         )
 
         successful_uploads = 0
@@ -2091,6 +2333,13 @@ class GitHubToQdrantProcessor:
                 f"  ✅ Uploaded batch {batch_num}/{total_batches} "
                 f"({len(batch_chunks)} chunks)"
             )
+            self._emit_progress(
+                "upload",
+                f"Uploaded batch {batch_num}/{total_batches}",
+                current=batch_num,
+                total=total_batches,
+                collection=collection_name,
+            )
 
             if batch_num % 10 == 0 or batch_num == total_batches:
                 progress = (successful_uploads / len(unique_chunks)) * 100
@@ -2098,11 +2347,28 @@ class GitHubToQdrantProcessor:
                     f"  📊 Progress: {progress:.0f}% "
                     f"({successful_uploads}/{len(unique_chunks)} unique chunks)"
                 )
+                self._emit_progress(
+                    "upload",
+                    f"Uploaded {successful_uploads}/{len(unique_chunks)} unique chunks",
+                    current=successful_uploads,
+                    total=len(unique_chunks),
+                    percent=progress,
+                    collection=collection_name,
+                )
 
         duplicate_count = len(chunks) - len(unique_chunks)
         print(
             f"\n✅ Upload completed: {successful_uploads} chunks uploaded to "
             f"collection '{collection_name}'"
+        )
+        self._emit_progress(
+            "upload",
+            f"Upload completed: {successful_uploads} chunks in '{collection_name}'",
+            current=successful_uploads,
+            total=len(unique_chunks),
+            percent=100.0,
+            level="success",
+            collection=collection_name,
         )
         if duplicate_count > 0:
             print(
@@ -2141,6 +2407,11 @@ class GitHubToQdrantProcessor:
 
         qdrant_config = self.config["qdrant"]
         collection_name = qdrant_config["collection_name"]
+        self._emit_progress(
+            "collection",
+            f"Setting up Qdrant collection '{collection_name}'",
+            collection=collection_name,
+        )
         self._validate_sparse_vector_setup()
         quantization_config = self._build_quantization_config()
         sparse_vectors_config = self._sparse_vector_config()
@@ -2153,11 +2424,22 @@ class GitHubToQdrantProcessor:
 
         if collection_exists and qdrant_config["recreate_collection"]:
             print(f"🔄 Recreating existing collection: {collection_name}")
+            self._emit_progress(
+                "collection",
+                f"Recreating existing collection '{collection_name}'",
+                collection=collection_name,
+                level="warning",
+            )
             self.qdrant_client.delete_collection(collection_name)
             collection_exists = False
 
         if not collection_exists:
             print(f"📚 Creating new collection: {collection_name}")
+            self._emit_progress(
+                "collection",
+                f"Creating new collection '{collection_name}'",
+                collection=collection_name,
+            )
             print(f"   Vector size: {qdrant_config['vector_size']}")
             print(f"   Distance metric: {qdrant_config['distance']}")
             if quantization_config:
@@ -2209,10 +2491,21 @@ class GitHubToQdrantProcessor:
                     quantization_config=quantization_config,
                 )
             print(f"✅ Collection '{collection_name}' created successfully")
+            self._emit_progress(
+                "collection",
+                f"Collection '{collection_name}' created",
+                collection=collection_name,
+                level="success",
+            )
             # Optional: Create payload indexes for faster filtered queries
             self._ensure_qdrant_payload_indexes(collection_name=collection_name)
         else:
             print(f"📚 Using existing collection: {collection_name}")
+            self._emit_progress(
+                "collection",
+                f"Using existing collection '{collection_name}'",
+                collection=collection_name,
+            )
             if sparse_vectors_config:
                 try:
                     self.qdrant_client.update_collection(
@@ -2326,6 +2619,11 @@ class GitHubToQdrantProcessor:
                 )
                 created += 1
                 print(f"   ⚡ Created payload index: {field_path} ({type_name})")
+                self._emit_progress(
+                    "index",
+                    f"Created payload index: {field_path} ({type_name})",
+                    collection=collection_name,
+                )
             except Exception as e:
                 # Idempotency: Qdrant returns an error if index already exists.
                 msg = str(e).lower()
@@ -2337,6 +2635,12 @@ class GitHubToQdrantProcessor:
 
         if created:
             print(f"✅ Payload indexing complete ({created} index(es) created)")
+            self._emit_progress(
+                "index",
+                f"Payload indexing complete ({created} index(es) created)",
+                collection=collection_name,
+                level="success",
+            )
 
     def _process_files_individually(
         self, text_files: List[str], repo_name: str, repo_root: str
@@ -2357,6 +2661,12 @@ class GitHubToQdrantProcessor:
             Total number of chunks created
         """
         print(f"\n📊 Processing {len(text_files)} files individually...")
+        self._emit_progress(
+            "files",
+            f"Processing {len(text_files)} files individually",
+            current=0,
+            total=len(text_files),
+        )
 
         all_chunks = []
         all_file_paths = []
@@ -2366,6 +2676,7 @@ class GitHubToQdrantProcessor:
         if self.config.get("pdf_processing", {}).get("enabled", False):
             pdf_processor = PDFProcessor(self.config, self.logger)
             print("   📑 PDF processing enabled")
+            self._emit_progress("pdf", "PDF processing enabled")
 
         # Track which files we actually (re)ingested so we can write "file marker" points
         # after a successful upload. This is more reliable than counting chunks in Qdrant,
@@ -2380,6 +2691,12 @@ class GitHubToQdrantProcessor:
             relative_path = os.path.relpath(file_path, repo_root)
 
             print(f"   📄 [{i}/{len(text_files)}] Processing: {relative_path}")
+            self._emit_progress(
+                "files",
+                f"Processing file: {relative_path}",
+                current=i,
+                total=len(text_files),
+            )
 
             try:
                 repo_url = self.config["github"].get("repository_url", "")
@@ -2405,6 +2722,13 @@ class GitHubToQdrantProcessor:
                         print(
                             f"      ⚠️  No content extracted from PDF: {relative_path}"
                         )
+                        self._emit_progress(
+                            "pdf",
+                            f"No content extracted from PDF: {relative_path}",
+                            current=i,
+                            total=len(text_files),
+                            level="warning",
+                        )
                         continue
                 else:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -2412,6 +2736,13 @@ class GitHubToQdrantProcessor:
 
                 if not file_content.strip():
                     print(f"      ⚠️  Empty file: {relative_path}")
+                    self._emit_progress(
+                        "files",
+                        f"Skipping empty file: {relative_path}",
+                        current=i,
+                        total=len(text_files),
+                        level="warning",
+                    )
                     continue
 
                 # File hash + upload id (SHA-256) used for incremental sync
@@ -2470,6 +2801,13 @@ class GitHubToQdrantProcessor:
                             f"   ⏭️  Skipping unchanged file (complete): {relative_path} "
                             f"(chunks={expected_total_chunks})"
                         )
+                        self._emit_progress(
+                            "files",
+                            f"Skipping unchanged file: {relative_path}",
+                            current=i,
+                            total=len(text_files),
+                            level="info",
+                        )
                         continue
 
                     # Remove old points for this file (repo-scoped) before re-uploading
@@ -2501,6 +2839,13 @@ class GitHubToQdrantProcessor:
                 all_file_paths.extend([relative_path] * len(file_chunks))
 
                 print(f"      ✅ Created {len(file_chunks)} chunks")
+                self._emit_progress(
+                    "chunk",
+                    f"Created {len(file_chunks)} chunks from {relative_path}",
+                    current=i,
+                    total=len(text_files),
+                    level="success",
+                )
 
                 if track_changes:
                     markers_to_upsert.append(
@@ -2519,14 +2864,34 @@ class GitHubToQdrantProcessor:
 
             except Exception as e:
                 print(f"      ❌ Error processing {relative_path}: {e}")
+                self._emit_progress(
+                    "files",
+                    f"Error processing {relative_path}: {e}",
+                    current=i,
+                    total=len(text_files),
+                    level="error",
+                )
                 continue
 
         if not all_chunks:
             print("⚠️  No chunks created from any files")
+            self._emit_progress(
+                "chunk",
+                "No chunks created from any files",
+                level="warning",
+            )
             return 0
 
         print(
             f"\n📊 Total chunks created: {len(all_chunks)} from {len(set(all_file_paths))} files"
+        )
+        self._emit_progress(
+            "chunk",
+            f"Total chunks created: {len(all_chunks)} from {len(set(all_file_paths))} files",
+            current=len(all_chunks),
+            total=len(all_chunks),
+            percent=100.0,
+            level="success",
         )
 
         # Process and upload chunks with file-aware metadata
@@ -3153,6 +3518,12 @@ class GitHubToQdrantProcessor:
         """
         repo_name = self._extract_repo_name(repo_url)
         print(f"\n🎯 Processing repository: {repo_name}")
+        self._emit_progress(
+            "repository",
+            f"Processing repository {repo_name}",
+            repo=repo_url,
+            collection=self.config["qdrant"].get("collection_name"),
+        )
 
         files_processed = 0
         chunks_created = 0
@@ -3173,6 +3544,13 @@ class GitHubToQdrantProcessor:
                     )
                     file_type = "text" if file_mode == "all_text" else "markdown"
                     print(f"⚠️  No {file_type} files found in repository")
+                    self._emit_progress(
+                        "scan",
+                        f"No {file_type} files found in repository",
+                        level="warning",
+                        repo=repo_url,
+                        collection=self.config["qdrant"].get("collection_name"),
+                    )
                     return (0, 0)
 
                 # Setup Qdrant collection
@@ -3185,17 +3563,26 @@ class GitHubToQdrantProcessor:
                 if combine_docs is False:  # Explicitly check for False
                     # Process files individually for better context and search quality
                     print("\n📄 Processing files individually for better context...")
+                    self._emit_progress(
+                        "files",
+                        "Processing files individually for better context",
+                    )
                     chunks_created = self._process_files_individually(
                         text_files, repo_name, clone_path
                     )
                 else:
                     # Legacy mode: Combine text files into folder-based files + overall combined file
                     print("\n📄 Combining documents (legacy mode)...")
+                    self._emit_progress("files", "Combining documents in legacy mode")
                     combined_content = self._combine_text_files(text_files, repo_name)
 
                     # Process and upload ONLY the final combined document
                     print(
                         "\n🎯 Creating vector embeddings for the combined document only..."
+                    )
+                    self._emit_progress(
+                        "embed",
+                        "Creating vector embeddings for combined document",
                     )
                     chunks_created = self._process_and_upload_documents_with_stats(
                         combined_content, repo_name
@@ -3209,6 +3596,7 @@ class GitHubToQdrantProcessor:
                     and not interrupted
                 ):
                     print("🧹 Cleaning up temporary files")
+                    self._emit_progress("cleanup", "Cleaning up temporary files")
 
         return (files_processed, chunks_created)
 
@@ -3262,6 +3650,19 @@ class GitHubToQdrantProcessor:
         print(f"   Total processing time: {duration.total_seconds():.1f} seconds")
         print(f"   Collection: {self.config['qdrant']['collection_name']}")
         print(f"   Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self._emit_progress(
+            "complete",
+            (
+                f"Repository completed: {files_processed} files, "
+                f"{chunks_created} chunks in {duration.total_seconds():.1f}s"
+            ),
+            current=files_processed,
+            total=files_processed,
+            percent=100.0,
+            level="success",
+            repo=repo_url,
+            collection=self.config["qdrant"].get("collection_name"),
+        )
 
 
 def load_repository_list(repo_list_path: str) -> List[RepositoryConfig]:
@@ -3334,6 +3735,12 @@ def process_repository_list(
     """
     repositories = load_repository_list(repo_list_path)
     results = []
+    processor._emit_progress(
+        "repo-list",
+        f"Loaded {len(repositories)} repositories from {repo_list_path}",
+        current=0,
+        total=len(repositories),
+    )
 
     print("\n" + "=" * 60)
     print("STARTING MULTI-REPOSITORY PROCESSING")
@@ -3351,6 +3758,14 @@ def process_repository_list(
         print(f"Branch: {repo_config.branch or 'default'}")
         print(f"Collection: {repo_config.collection_name}")
         print("=" * 60)
+        processor._emit_progress(
+            "repo-list",
+            f"Processing repository {i}/{len(repositories)}: {repo_config.url}",
+            current=i,
+            total=len(repositories),
+            repo=repo_config.url,
+            collection=repo_config.collection_name,
+        )
 
         try:
             result = processor.process_repository_with_override(
@@ -3361,10 +3776,28 @@ def process_repository_list(
             )
             results.append(result)
             print(f"✅ Successfully processed: {repo_config.url}")
+            processor._emit_progress(
+                "repo-list",
+                f"Successfully processed {repo_config.url}",
+                current=i,
+                total=len(repositories),
+                level="success",
+                repo=repo_config.url,
+                collection=repo_config.collection_name,
+            )
 
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Failed to process {repo_config.url}: {error_msg}")
+            processor._emit_progress(
+                "repo-list",
+                f"Failed to process {repo_config.url}: {error_msg}",
+                current=i,
+                total=len(repositories),
+                level="error",
+                repo=repo_config.url,
+                collection=repo_config.collection_name,
+            )
 
             # Create failed result
             result = ProcessingResult(
@@ -3382,6 +3815,22 @@ def process_repository_list(
 
     # Print summary report
     print_summary_report(results, overall_duration, processor)
+    processor._emit_progress(
+        "complete",
+        (
+            f"Repository list completed: "
+            f"{sum(1 for result in results if result.status == 'success')}/"
+            f"{len(results)} succeeded in {overall_duration.total_seconds():.1f}s"
+        ),
+        current=len(results),
+        total=len(results),
+        percent=100.0,
+        level=(
+            "success"
+            if all(result.status == "success" for result in results)
+            else "warning"
+        ),
+    )
 
     return results
 
@@ -3480,16 +3929,18 @@ def run_ingest(
     config_path: str,
     repo_url: Optional[str] = None,
     repo_list: Optional[str] = None,
+    progress: Optional[IngestProgressCallback] = None,
 ) -> int:
     """Run ingestion for one repository or a repository list."""
     # Set up signal handler for clean interruption
-    signal.signal(signal.SIGINT, signal_handler)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal_handler)
 
     # Load environment variables from .env file
     load_dotenv()
 
     try:
-        processor = GitHubToQdrantProcessor(config_path)
+        processor = GitHubToQdrantProcessor(config_path, progress=progress)
 
         # Check if repository list is provided
         if repo_list:
@@ -3499,13 +3950,48 @@ def run_ingest(
             # Process single repository (current behavior)
             processor.process_repository(repo_url)
 
+    except IngestCancelled as e:
+        if progress is not None:
+            try:
+                progress(
+                    IngestProgressEvent(
+                        stage="stopped",
+                        message=str(e) or "Ingestion stopped",
+                        level="warning",
+                    )
+                )
+            except IngestCancelled:
+                pass
+        return 130
     except KeyboardInterrupt:
         # Handle Ctrl+C gracefully without showing traceback
         print("\n\n⚠️  Process interrupted by user (Ctrl+C)")
         print("🧹 Cleaning up and exiting...")
+        if progress is not None:
+            try:
+                progress(
+                    IngestProgressEvent(
+                        stage="stopped",
+                        message="Process interrupted by user",
+                        level="warning",
+                    )
+                )
+            except Exception:
+                pass
         return 130  # Standard Unix exit code for SIGINT
     except Exception as e:
         logging.error("Script failed: %s", e)
+        if progress is not None:
+            try:
+                progress(
+                    IngestProgressEvent(
+                        stage="failed",
+                        message=f"Ingestion failed: {e}",
+                        level="error",
+                    )
+                )
+            except Exception:
+                pass
         return 1
 
     return 0

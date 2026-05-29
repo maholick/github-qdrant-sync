@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+import threading
 import time
 from io import StringIO
 from pathlib import Path
@@ -181,7 +182,7 @@ def test_brand_header_renders_project_metadata(monkeypatch):
     assert "GithubQdrant-Sync" in output
     assert "GitHub repositories -> Qdrant vector knowledge" in output
     assert "maholick/github-qdrant-sync" in output
-    assert "v0.5.0" in output
+    assert "v0.5.1" in output
     assert "Qdrat" not in output
     assert max(len(line) for line in output.splitlines()) <= 80
 
@@ -259,6 +260,85 @@ def test_ingest_propagates_runner_exit_code(tmp_path, monkeypatch):
     result = runner.invoke(app, ["ingest", str(config)])
 
     assert result.exit_code == 7
+
+
+def test_run_ingest_accepts_progress_callback(monkeypatch):
+    events = []
+
+    class FakeProcessor:
+        def __init__(self, config_path, progress=None):
+            self.progress = progress
+            assert config_path == "config.yaml"
+            progress(github_to_qdrant.IngestProgressEvent("initialize", "ready"))
+
+        def process_repository(self, repo_url=None):
+            assert repo_url is None
+            self.progress(
+                github_to_qdrant.IngestProgressEvent(
+                    "complete", "done", level="success"
+                )
+            )
+
+    monkeypatch.setattr(github_to_qdrant, "GitHubToQdrantProcessor", FakeProcessor)
+    monkeypatch.setattr(github_to_qdrant.signal, "signal", lambda *_: None)
+
+    exit_code = github_to_qdrant.run_ingest("config.yaml", progress=events.append)
+
+    assert exit_code == 0
+    assert [event.stage for event in events] == ["initialize", "complete"]
+
+
+def test_run_ingest_progress_cancellation_returns_130(monkeypatch):
+    events = []
+
+    class FakeProcessor:
+        def __init__(self, config_path, progress=None):
+            self.progress = progress
+
+        def process_repository(self, repo_url=None):
+            self.progress(github_to_qdrant.IngestProgressEvent("clone", "cloning"))
+
+    def progress(event):
+        events.append(event)
+        if event.stage == "clone":
+            raise github_to_qdrant.IngestCancelled("stop requested")
+
+    monkeypatch.setattr(github_to_qdrant, "GitHubToQdrantProcessor", FakeProcessor)
+    monkeypatch.setattr(github_to_qdrant.signal, "signal", lambda *_: None)
+
+    exit_code = github_to_qdrant.run_ingest("config.yaml", progress=progress)
+
+    assert exit_code == 130
+    assert [event.stage for event in events] == ["clone", "stopped"]
+    assert events[-1].message == "stop requested"
+
+
+def test_run_ingest_skips_signal_handler_outside_main_thread(monkeypatch):
+    signal_calls = []
+    results = []
+
+    class FakeProcessor:
+        def __init__(self, config_path, progress=None):
+            pass
+
+        def process_repository(self, repo_url=None):
+            pass
+
+    monkeypatch.setattr(github_to_qdrant, "GitHubToQdrantProcessor", FakeProcessor)
+    monkeypatch.setattr(
+        github_to_qdrant.signal,
+        "signal",
+        lambda *args: signal_calls.append(args),
+    )
+
+    worker = threading.Thread(
+        target=lambda: results.append(github_to_qdrant.run_ingest("config.yaml"))
+    )
+    worker.start()
+    worker.join(timeout=5)
+
+    assert results == [0]
+    assert signal_calls == []
 
 
 def test_query_delegates_to_shared_runner(tmp_path, monkeypatch):
@@ -1683,6 +1763,18 @@ def test_tui_command_parser_maps_supported_commands():
     assert github_qdrant_tui.parse_tui_command("quit") == (
         github_qdrant_tui.TuiCommand("quit")
     )
+    assert github_qdrant_tui.parse_tui_command("/pause") == (
+        github_qdrant_tui.TuiCommand("pause")
+    )
+    assert github_qdrant_tui.parse_tui_command("/resume") == (
+        github_qdrant_tui.TuiCommand("resume")
+    )
+    assert github_qdrant_tui.parse_tui_command("/stop") == (
+        github_qdrant_tui.TuiCommand("stop")
+    )
+    assert github_qdrant_tui.parse_tui_command("/cancel") == (
+        github_qdrant_tui.TuiCommand("stop")
+    )
 
 
 def test_textual_app_mounts_fixed_panes(tmp_path):
@@ -1779,6 +1871,255 @@ def test_textual_grouped_palette_has_categories(tmp_path):
                 "/benchmark [eval.yaml]"
             ]
             tui.handle_command("/help config")
+
+    asyncio.run(run_app())
+
+
+def test_textual_ingest_passes_progress_callback_and_keeps_summary(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.yaml"
+    _write_answer_config(config)
+    calls = {}
+
+    def fake_run_ingest(config_path, repo_url=None, repo_list=None, progress=None):
+        calls["config_path"] = config_path
+        calls["repo_url"] = repo_url
+        calls["repo_list"] = repo_list
+        calls["has_progress"] = callable(progress)
+        progress(
+            github_to_qdrant.IngestProgressEvent(
+                "scan",
+                "Found 2 text files",
+                current=2,
+                total=2,
+                level="success",
+            )
+        )
+        return 0
+
+    monkeypatch.setattr(github_qdrant_tui, "run_ingest", fake_run_ingest)
+
+    async def run_app():
+        tui = github_qdrant_tui.GithubQdrantSyncApp(config=config)
+        async with tui.run_test(size=(110, 32)) as pilot:
+            tui.handle_command("/ingest config")
+            await tui.active_worker.wait()
+            await pilot.pause()
+            assert calls["config_path"] == str(config)
+            assert calls["repo_url"] is None
+            assert calls["repo_list"] is None
+            assert calls["has_progress"] is True
+            assert any(
+                event.message == "Found 2 text files"
+                for event in tui.ingest_progress_events
+            )
+            assert tui.ingest_progress_events[-1].message == (
+                "Ingestion completed successfully."
+            )
+            assert tui.operation_running is False
+            assert tui.query_one("#command", Input).disabled is False
+
+    asyncio.run(run_app())
+
+
+def test_textual_ingest_pause_resume_and_stop_controls(tmp_path):
+    config = tmp_path / "config.yaml"
+    _write_answer_config(config)
+
+    async def run_app():
+        tui = github_qdrant_tui.GithubQdrantSyncApp(config=config)
+        async with tui.run_test(size=(110, 32)):
+            assert tui._begin_operation(
+                "Ingestion",
+                "Running ingestion",
+                "Processing repository content into Qdrant.",
+                allow_commands=True,
+            )
+            tui.handle_command("/pause")
+            assert tui.ingest_pause_event.is_set() is False
+            assert "Pause requested" in tui.ingest_progress_events[-1].message
+            tui.handle_command("/resume")
+            assert tui.ingest_pause_event.is_set() is True
+            assert tui.ingest_progress_events[-1].message == "Ingestion resumed."
+            tui.handle_command("/stop")
+            assert tui.ingest_stop_event.is_set() is True
+            assert "Stop requested" in tui.ingest_progress_events[-1].message
+
+    asyncio.run(run_app())
+
+
+def test_textual_ingest_progress_format_handles_totals(tmp_path):
+    config = tmp_path / "config.yaml"
+    _write_answer_config(config)
+
+    async def run_app():
+        tui = github_qdrant_tui.GithubQdrantSyncApp(config=config)
+        async with tui.run_test(size=(110, 32)):
+            assert (
+                tui._ingest_progress_text(
+                    github_to_qdrant.IngestProgressEvent("scan", "starting")
+                )
+                == ""
+            )
+            assert (
+                tui._ingest_progress_text(
+                    github_to_qdrant.IngestProgressEvent(
+                        "scan", "empty", current=0, total=0
+                    )
+                )
+                == ""
+            )
+            progress_text = tui._ingest_progress_text(
+                github_to_qdrant.IngestProgressEvent(
+                    "upload", "half", current=5, total=10
+                )
+            )
+            assert "50.0%" in progress_text
+            assert "5/10" in progress_text
+
+    asyncio.run(run_app())
+
+
+def test_textual_ingest_dashboard_renders_at_fixed_width(tmp_path, monkeypatch):
+    config = tmp_path / "config.yaml"
+    _write_answer_config(config)
+    writes = []
+    clears = []
+    original_write = RichLog.write
+    original_clear = RichLog.clear
+
+    def recording_write(
+        self,
+        content,
+        width=None,
+        expand=False,
+        shrink=True,
+        scroll_end=None,
+        animate=False,
+    ):
+        if self.id == "main":
+            writes.append(width)
+        return original_write(
+            self,
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=scroll_end,
+            animate=animate,
+        )
+
+    def recording_clear(self):
+        if self.id == "main":
+            clears.append(True)
+        return original_clear(self)
+
+    monkeypatch.setattr(RichLog, "write", recording_write)
+    monkeypatch.setattr(RichLog, "clear", recording_clear)
+
+    async def run_app():
+        tui = github_qdrant_tui.GithubQdrantSyncApp(config=config)
+        async with tui.run_test(size=(120, 32)):
+            writes.clear()
+            clears.clear()
+            widths = []
+            messages = [
+                "Skipping unchanged file: app/Exceptions/ToolExecutionException.php",
+                (
+                    "Skipping unchanged file: "
+                    "app/Services/AI/UnifiedToolCalling/ToolMetricsCollector.php"
+                ),
+                "Skipping unchanged file: tests/Browser/specs/compliance.spec.ts",
+            ]
+            for index, message in enumerate(messages, start=1):
+                tui.ingest_progress_events.append(
+                    github_qdrant_tui.IngestProgressEvent(
+                        "files",
+                        message,
+                        current=index * 317,
+                        total=1655,
+                    )
+                )
+                widths.append(tui._main_render_width())
+                tui._render_ingest_dashboard(force=True)
+
+            assert len(writes) == 3
+            assert len(clears) == 3
+            assert all(width is not None for width in writes)
+            assert writes == widths
+            assert len(set(writes)) == 1
+            message_width = max(
+                20,
+                widths[0] - github_qdrant_tui.INGEST_PROGRESS_COLUMN_WIDTH - 34,
+            )
+            clipped_message = github_qdrant_tui._clip(messages[1], message_width)
+            assert len(messages[1]) > message_width
+            assert len(clipped_message) == message_width
+            assert clipped_message.endswith("…")
+
+    asyncio.run(run_app())
+
+
+def test_textual_ingest_dashboard_caches_width_for_operation(tmp_path, monkeypatch):
+    config = tmp_path / "config.yaml"
+    _write_answer_config(config)
+    writes = []
+    original_write = RichLog.write
+
+    def recording_write(
+        self,
+        content,
+        width=None,
+        expand=False,
+        shrink=True,
+        scroll_end=None,
+        animate=False,
+    ):
+        if self.id == "main":
+            writes.append(width)
+        return original_write(
+            self,
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=scroll_end,
+            animate=animate,
+        )
+
+    monkeypatch.setattr(RichLog, "write", recording_write)
+
+    async def run_app():
+        tui = github_qdrant_tui.GithubQdrantSyncApp(config=config)
+        async with tui.run_test(size=(120, 32)):
+            writes.clear()
+            reported_widths = iter([96, 72, 128])
+
+            def fake_main_width():
+                return next(reported_widths)
+
+            monkeypatch.setattr(tui, "_main_render_width", fake_main_width)
+            for index, message in enumerate(
+                [
+                    "Skipping unchanged file: app/LongController.php",
+                    "Skipping unchanged file: config/checklists.php",
+                    "Skipping unchanged file: tests/Browser/specs/compliance.spec.ts",
+                ],
+                start=1,
+            ):
+                tui.ingest_progress_events.append(
+                    github_qdrant_tui.IngestProgressEvent(
+                        "files",
+                        message,
+                        current=index,
+                        total=3,
+                    )
+                )
+                tui._render_ingest_dashboard(force=True)
+
+            assert writes == [96, 96, 96]
+            assert tui.ingest_dashboard_width == 96
 
     asyncio.run(run_app())
 

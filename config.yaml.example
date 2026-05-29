@@ -219,6 +219,10 @@ processing:
     - .gitignore
     
     # Add more extensions as needed...
+
+  # In all_text mode, also include files that look like readable text even when
+  # their extension/name is not listed above. Exclude patterns still apply.
+  detect_text_content: true
   
   # Exclude these patterns from processing
   exclude_patterns:

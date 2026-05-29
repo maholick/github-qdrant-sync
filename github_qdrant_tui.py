@@ -6,6 +6,7 @@ from __future__ import annotations
 import shlex
 import shutil
 import tempfile
+import threading
 import time
 import re
 import json
@@ -15,51 +16,30 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+import yaml
 from rich import box
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from ruamel.yaml import YAML
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
-from github_qdrant_cli import (  # pylint: disable=protected-access
-    AnswerResponse,
-    WizardConfigAnswers,
-    _answering_config,
-    _app_version,
-    _clip,
-    _default_config,
-    generate_answer,
-    validate_config_data,
-)
-from github_qdrant_quality import (
-    benchmark_table,
-    doctor_table,
-    improve_table,
-    resolve_benchmark_cases,
-    run_benchmark,
-    run_doctor,
-    run_improve,
-)
-from github_to_qdrant import run_ingest
-from rag_retrieval import (
-    CollectionCompatibility,
-    CollectionTarget,
-    QueryResponse,
-    execute_query,
-    inspect_collection_targets,
-    resolve_collection_targets,
-)
-
 
 PROJECT_TITLE = "GithubQdrant-Sync"
 PROJECT_REPO_LABEL = "maholick/github-qdrant-sync"
+FALLBACK_VERSION = "0.5.1"
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+MAX_INGEST_PROGRESS_EVENTS = 200
+INGEST_RENDER_INTERVAL_SECONDS = 0.2
+INGEST_PROGRESS_BAR_WIDTH = 16
+INGEST_PROGRESS_COLUMN_WIDTH = 34
 
 
 @dataclass(frozen=True)
@@ -72,6 +52,202 @@ class SlashCommandSpec:
     example: str = ""
     aliases: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CollectionTarget:
+    """Lightweight collection metadata for startup/sidebar rendering."""
+
+    collection_name: str
+    repository_url: str = ""
+    repository_name: str = ""
+    branch: str = ""
+
+
+@dataclass(frozen=True)
+class IngestProgressEvent:
+    """Local progress event shape; backend events use the same attributes."""
+
+    stage: str
+    message: str
+    current: Optional[int] = None
+    total: Optional[int] = None
+    percent: Optional[float] = None
+    level: str = "info"
+    repo: Optional[str] = None
+    collection: Optional[str] = None
+
+
+def _app_version() -> str:
+    """Return installed package version without importing the CLI stack."""
+    try:
+        return version("github-qdrant-sync")
+    except PackageNotFoundError:
+        return FALLBACK_VERSION
+
+
+def _clip(value: Any, max_chars: int) -> str:
+    """Return a single-line string clipped with an ellipsis."""
+    text = "" if value is None else str(value).replace("\n", " ")
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return "…"
+    return text[: max_chars - 1] + "…"
+
+
+def _resolve_collection_targets(
+    cfg: Dict[str, Any],
+    collection: Optional[str] = None,
+    repo_list: Optional[str] = None,
+) -> List[CollectionTarget]:
+    """Resolve config/repo-list collection targets without importing retrieval code."""
+    if repo_list:
+        with open(repo_list, "r", encoding="utf-8") as repo_list_file:
+            data = yaml.safe_load(repo_list_file)
+        if not data or "repositories" not in data:
+            raise ValueError(
+                "Repository list file must contain a 'repositories' key with a list of repositories"
+            )
+        repositories = data["repositories"]
+        if not isinstance(repositories, list):
+            raise ValueError("'repositories' must be a list")
+        targets: List[CollectionTarget] = []
+        seen: set[str] = set()
+        for index, repo in enumerate(repositories, 1):
+            if not isinstance(repo, dict):
+                raise ValueError(
+                    f"Repository {index}: Each repository must be a dictionary"
+                )
+            if "url" not in repo:
+                raise ValueError(f"Repository {index}: 'url' field is required")
+            if "collection_name" not in repo:
+                raise ValueError(
+                    f"Repository {index}: 'collection_name' field is required"
+                )
+            collection_name = str(repo["collection_name"]).strip()
+            if not collection_name or collection_name in seen:
+                continue
+            seen.add(collection_name)
+            targets.append(
+                CollectionTarget(
+                    collection_name=collection_name,
+                    repository_url=str(repo.get("url") or ""),
+                    repository_name=str(repo.get("name") or ""),
+                    branch=str(repo.get("branch") or ""),
+                )
+            )
+        if not targets:
+            raise ValueError(
+                "Repository list does not contain any collection_name values"
+            )
+        if collection:
+            selected = str(collection).strip()
+            for target in targets:
+                if target.collection_name == selected:
+                    return [target]
+            return [CollectionTarget(collection_name=selected)]
+        return targets
+
+    if collection:
+        return [CollectionTarget(collection_name=str(collection).strip())]
+
+    qcfg = cfg.get("qdrant", {})
+    default_collection = str(qcfg.get("collection_name") or "").strip()
+    if not default_collection:
+        raise ValueError("Missing required 'qdrant.collection_name' in config")
+    return [CollectionTarget(collection_name=default_collection)]
+
+
+def validate_config_data(config: Dict[str, Any]) -> Any:
+    """Lazy proxy for CLI config validation."""
+    from github_qdrant_cli import validate_config_data as validate
+
+    return validate(config)
+
+
+def execute_query(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for retrieval query execution."""
+    from rag_retrieval import execute_query as execute
+
+    return execute(*args, **kwargs)
+
+
+def inspect_collection_targets(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for Qdrant collection inspection."""
+    from rag_retrieval import inspect_collection_targets as inspect
+
+    return inspect(*args, **kwargs)
+
+
+def generate_answer(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for answer generation."""
+    from github_qdrant_cli import generate_answer as generate
+
+    return generate(*args, **kwargs)
+
+
+def run_ingest(*args: Any, **kwargs: Any) -> int:
+    """Lazy proxy for ingestion execution."""
+    from github_to_qdrant import run_ingest as ingest
+
+    return ingest(*args, **kwargs)
+
+
+def _ingest_cancelled(message: str) -> Exception:
+    """Return the backend cancellation exception without importing it at startup."""
+    from github_to_qdrant import IngestCancelled
+
+    return IngestCancelled(message)
+
+
+def run_doctor(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for doctor checks."""
+    from github_qdrant_quality import run_doctor as doctor
+
+    return doctor(*args, **kwargs)
+
+
+def run_benchmark(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for benchmark execution."""
+    from github_qdrant_quality import run_benchmark as benchmark
+
+    return benchmark(*args, **kwargs)
+
+
+def run_improve(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for improvement analysis."""
+    from github_qdrant_quality import run_improve as improve
+
+    return improve(*args, **kwargs)
+
+
+def resolve_benchmark_cases(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for benchmark case resolution."""
+    from github_qdrant_quality import resolve_benchmark_cases as resolve
+
+    return resolve(*args, **kwargs)
+
+
+def doctor_table(report: Any) -> Table:
+    """Lazy proxy for doctor table rendering."""
+    from github_qdrant_quality import doctor_table as render
+
+    return render(report)
+
+
+def benchmark_table(report: Any) -> Table:
+    """Lazy proxy for benchmark table rendering."""
+    from github_qdrant_quality import benchmark_table as render
+
+    return render(report)
+
+
+def improve_table(report: Any) -> Table:
+    """Lazy proxy for improvement table rendering."""
+    from github_qdrant_quality import improve_table as render
+
+    return render(report)
 
 
 COMMAND_CATEGORIES = (
@@ -267,6 +443,25 @@ SLASH_COMMANDS = (
         "Ingest repositories from a list.",
         "/ingest repo-list repositories.yaml",
     ),
+    SlashCommandSpec(
+        "Ingest",
+        "/pause",
+        "Pause the current ingestion at the next checkpoint.",
+        "/pause",
+    ),
+    SlashCommandSpec(
+        "Ingest",
+        "/resume",
+        "Resume a paused ingestion.",
+        "/resume",
+    ),
+    SlashCommandSpec(
+        "Ingest",
+        "/stop",
+        "Stop ingestion without closing the TUI.",
+        "/stop",
+        aliases=("/cancel",),
+    ),
     SlashCommandSpec("Session", "/clear", "Clear output.", "/clear"),
     SlashCommandSpec(
         "Session",
@@ -456,6 +651,10 @@ def parse_tui_command(raw_command: str) -> TuiCommand:
         "exit": "quit",
         "q": "quit",
         "ingest": "ingest",
+        "pause": "pause",
+        "resume": "resume",
+        "stop": "stop",
+        "cancel": "stop",
     }
     if lowered in exact_commands:
         return TuiCommand(exact_commands[lowered])
@@ -481,6 +680,10 @@ def parse_tui_command(raw_command: str) -> TuiCommand:
         "benchmark": "benchmark",
         "doctor": "doctor",
         "improve": "improve",
+        "pause": "pause",
+        "resume": "resume",
+        "stop": "stop",
+        "cancel": "stop",
     }
     for name, parsed_name in command_aliases.items():
         prefix = f"{name} "
@@ -746,7 +949,7 @@ class GithubQdrantSyncApp(App[None]):
         self.setup_answers: Dict[str, Any] = {}
         self.loaded_config: Dict[str, Any] = {}
         self.collection_targets: List[CollectionTarget] = []
-        self.collection_statuses: List[CollectionCompatibility] = []
+        self.collection_statuses: List[Any] = []
         self.last_error: str = ""
         self.active_worker: Any = None
         self.activity_timer: Any = None
@@ -757,6 +960,13 @@ class GithubQdrantSyncApp(App[None]):
         self.operation_phases: List[str] = []
         self.operation_started_at = 0.0
         self.operation_frame = 0
+        self.operation_allows_commands = False
+        self.ingest_progress_events: List[IngestProgressEvent] = []
+        self.ingest_last_render_at = 0.0
+        self.ingest_dashboard_width: Optional[int] = None
+        self.ingest_pause_event = threading.Event()
+        self.ingest_pause_event.set()
+        self.ingest_stop_event = threading.Event()
 
     def compose(self) -> ComposeResult:
         """Compose fixed panes for status, output, sources, collections, and input."""
@@ -828,6 +1038,20 @@ class GithubQdrantSyncApp(App[None]):
             return
 
         command = parse_tui_command(raw_command)
+        if (
+            self.operation_running
+            and self.operation_title == "Ingestion"
+            and command.name not in {"pause", "resume", "stop", "help", "quit"}
+        ):
+            self._record_ingest_progress(
+                IngestProgressEvent(
+                    stage="control",
+                    message="Ingestion is running. Use `/pause`, `/resume`, or `/stop`.",
+                    level="warning",
+                ),
+                force=True,
+            )
+            return
         if command.name == "help":
             self._render_command_palette(command.argument)
         elif command.name == "clear":
@@ -876,6 +1100,12 @@ class GithubQdrantSyncApp(App[None]):
             self._run_validation()
         elif command.name == "ingest":
             self._run_ingest_command(command.argument)
+        elif command.name == "pause":
+            self._pause_ingestion()
+        elif command.name == "resume":
+            self._resume_ingestion()
+        elif command.name == "stop":
+            self._stop_ingestion()
         else:
             self._render_error(
                 "Unknown command",
@@ -899,7 +1129,7 @@ class GithubQdrantSyncApp(App[None]):
 
         self.loaded_config = self.working_config
         try:
-            self.collection_targets = resolve_collection_targets(
+            self.collection_targets = _resolve_collection_targets(
                 self.loaded_config,
                 collection=self.collection,
                 repo_list=str(self.repo_list) if self.repo_list else None,
@@ -1128,6 +1358,11 @@ class GithubQdrantSyncApp(App[None]):
             return
 
         provider = str(self.setup_answers.get("embedding_provider") or "mistral_ai")
+        from github_qdrant_cli import (  # pylint: disable=import-outside-toplevel
+            WizardConfigAnswers,
+            _default_config,
+        )
+
         config_data = _default_config(
             WizardConfigAnswers(
                 repository_url=str(self.setup_answers.get("repository_url") or ""),
@@ -1231,11 +1466,16 @@ class GithubQdrantSyncApp(App[None]):
     def _provider_label(self) -> str:
         """Return embedding and answer provider details for the header."""
         embedding = self.loaded_config.get("embedding_provider", "unknown")
-        try:
-            answering = _answering_config(self.loaded_config)
-            answer = f"{answering.get('provider')} / {answering.get('model')}"
-        except ValueError:
-            answer = "answers not configured"
+        answering = self.loaded_config.get("answering", {})
+        answer_provider = (
+            answering.get("provider") if isinstance(answering, dict) else ""
+        )
+        answer_model = answering.get("model") if isinstance(answering, dict) else ""
+        answer = (
+            f"{answer_provider} / {answer_model}"
+            if answer_provider and answer_model
+            else "answers not configured"
+        )
         return f"embedding {embedding} · answer {answer}"
 
     def _refresh_status(self) -> None:
@@ -1290,7 +1530,14 @@ class GithubQdrantSyncApp(App[None]):
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def _begin_operation(self, title: str, step: str, detail: str) -> bool:
+    def _begin_operation(
+        self,
+        title: str,
+        step: str,
+        detail: str,
+        *,
+        allow_commands: bool = False,
+    ) -> bool:
         """Start a visible background operation and disable command input."""
         if self.active_worker is not None and self.active_worker.is_running:
             self._render_error(
@@ -1306,9 +1553,14 @@ class GithubQdrantSyncApp(App[None]):
         self.operation_phases = [step]
         self.operation_started_at = time.monotonic()
         self.operation_frame = 0
+        self.operation_allows_commands = allow_commands
+        if title == "Ingestion":
+            self.ingest_dashboard_width = self._main_render_width()
         command_input = self.query_one("#command", Input)
-        command_input.disabled = True
-        command_input.placeholder = "Working..."
+        command_input.disabled = not allow_commands
+        command_input.placeholder = (
+            "/pause, /resume, /stop" if allow_commands else "Working..."
+        )
         self._render_working_panel(title, detail)
         if self.activity_timer is not None:
             self.activity_timer.resume()
@@ -1318,6 +1570,7 @@ class GithubQdrantSyncApp(App[None]):
     def _finish_operation(self, lines: List[str]) -> None:
         """Stop the spinner and re-enable the command input."""
         self.operation_running = False
+        self.operation_allows_commands = False
         if self.activity_timer is not None:
             self.activity_timer.pause()
         command_input = self.query_one("#command", Input)
@@ -1329,6 +1582,7 @@ class GithubQdrantSyncApp(App[None]):
     def _finish_operation_with_error(self, title: str, message: str) -> None:
         """Stop the active operation and render an error."""
         self.operation_running = False
+        self.operation_allows_commands = False
         if self.activity_timer is not None:
             self.activity_timer.pause()
         command_input = self.query_one("#command", Input)
@@ -1339,16 +1593,18 @@ class GithubQdrantSyncApp(App[None]):
 
     def _render_working_panel(self, title: str, detail: str) -> None:
         """Replace the main pane with an in-progress state immediately."""
-        main = self.query_one("#main", RichLog)
-        main.clear()
-        main.write(
+        dashboard_width = self._operation_render_width(title)
+        self._write_main_fixed(
             Panel(
                 detail,
                 title=f"{title} in progress",
                 border_style="yellow",
                 box=box.ROUNDED,
                 safe_box=True,
-            )
+                width=dashboard_width,
+                expand=False,
+            ),
+            dashboard_width,
         )
 
     def _tick_activity(self) -> None:
@@ -1388,6 +1644,361 @@ class GithubQdrantSyncApp(App[None]):
             )
 
         return update
+
+    def _ingest_stage_label(self, stage: str) -> str:
+        """Return a compact display label for an ingestion stage."""
+        labels = {
+            "initialize": "init",
+            "connect": "connect",
+            "repository": "repo",
+            "repo-list": "repo-list",
+            "clone": "clone",
+            "scan": "scan",
+            "collection": "collection",
+            "index": "index",
+            "files": "files",
+            "pdf": "pdf",
+            "chunk": "chunk",
+            "embed": "embed",
+            "dedupe": "dedupe",
+            "upload": "upload",
+            "cleanup": "cleanup",
+            "complete": "done",
+            "failed": "failed",
+            "stopped": "stopped",
+            "control": "control",
+        }
+        return labels.get(stage, stage)
+
+    def _ingest_level_style(self, level: str) -> str:
+        """Return a Rich style for an ingestion event level."""
+        return {
+            "success": "green",
+            "warning": "yellow",
+            "error": "red",
+        }.get(level, "cyan")
+
+    def _ingest_progress_text(self, event: IngestProgressEvent) -> str:
+        """Render a compact textual progress bar for known totals."""
+        progress_text = self._ingest_progress_plain(event)
+        if not progress_text:
+            return ""
+        progress_bar_plain = progress_text[:INGEST_PROGRESS_BAR_WIDTH]
+        details = progress_text[INGEST_PROGRESS_BAR_WIDTH:]
+        return f"[cyan]{progress_bar_plain}[/cyan]{details}"
+
+    def _ingest_progress_plain(
+        self, event: IngestProgressEvent, width: Optional[int] = None
+    ) -> str:
+        """Render a plain progress bar for fixed-width dashboard lines."""
+        percent = event.percent
+        if percent is None and event.current is not None and event.total:
+            percent = (event.current / event.total) * 100
+        if percent is None:
+            return ""
+
+        bounded = max(0.0, min(100.0, float(percent)))
+        filled = int(round((bounded / 100.0) * INGEST_PROGRESS_BAR_WIDTH))
+        progress_bar = "█" * filled + "░" * (INGEST_PROGRESS_BAR_WIDTH - filled)
+        count = ""
+        if event.current is not None and event.total:
+            digits = max(len(str(event.total)), len(str(event.current)))
+            count = f" {event.current:>{digits}}/{event.total:<{digits}}"
+        text = f"{progress_bar} {bounded:5.1f}%{count}"
+        return _clip(text, width) if width else text
+
+    def _main_render_width(self) -> int:
+        """Return a stable render width for main-pane Rich output."""
+        main = self.query_one("#main", RichLog)
+        widget_size = getattr(main, "size", None)
+        widget_width = getattr(widget_size, "width", 0) if widget_size else 0
+        if widget_width:
+            return max(40, widget_width - 4)
+        app_size = getattr(self, "size", None)
+        app_width = getattr(app_size, "width", 0) if app_size else 0
+        return max(40, app_width - 8) if app_width else 96
+
+    def _operation_render_width(self, title: str = "") -> int:
+        """Return the cached render width for live ingestion panels."""
+        if title == "Ingestion" or self.operation_title == "Ingestion":
+            if self.ingest_dashboard_width is None:
+                self.ingest_dashboard_width = self._main_render_width()
+            return self.ingest_dashboard_width
+        return self._main_render_width()
+
+    def _write_main_fixed(self, renderable: Any, width: Optional[int] = None) -> int:
+        """Replace the main pane with a Rich renderable at an explicit width."""
+        render_width = width or self._main_render_width()
+        main = self.query_one("#main", RichLog)
+        main.clear()
+        main.write(renderable, width=render_width, scroll_end=False)
+        return render_width
+
+    def _dashboard_border(self, width: int, title: str, style: str) -> Text:
+        """Return a full-width dashboard border line."""
+        inner_width = max(0, width - 2)
+        if title:
+            label = _clip(f" {title} ", inner_width)
+            left = max(0, (inner_width - len(label)) // 2)
+            right = max(0, inner_width - len(label) - left)
+            line = Text("╭" + "─" * left, style=style)
+            line.append(label, style=f"bold {style}")
+            line.append("─" * right + "╮", style=style)
+            return line
+        return Text("╰" + "─" * inner_width + "╯", style=style)
+
+    def _dashboard_line(self, width: int, content: Text, style: str) -> Text:
+        """Wrap content in a full-width dashboard line."""
+        inner_width = max(0, width - 2)
+        if len(content.plain) > inner_width:
+            content = Text(_clip(content.plain, inner_width))
+        line = Text("│", style=style)
+        line.append(content)
+        line.append(" " * max(0, inner_width - len(content.plain)))
+        line.append("│", style=style)
+        return line
+
+    def _ingest_dashboard_text(
+        self,
+        *,
+        title: str,
+        border_style: str,
+        width: int,
+    ) -> Text:
+        """Build a physically fixed-width ingestion dashboard."""
+        events = self.ingest_progress_events[-12:]
+        current = events[-1] if events else None
+        inner_width = max(20, width - 2)
+        content_width = max(16, inner_width - 4)
+        label_width = 10
+        value_width = max(8, content_width - label_width - 2)
+        stage_width = 10
+        progress_width = min(INGEST_PROGRESS_COLUMN_WIDTH, max(18, content_width // 3))
+        message_width = max(12, content_width - stage_width - progress_width - 4)
+        progress_width = max(10, content_width - stage_width - message_width - 4)
+
+        def row(label: str, value: str, value_style: Optional[str] = None) -> Text:
+            content = Text("  ")
+            content.append(
+                _clip(label, label_width).ljust(label_width), style="bold cyan"
+            )
+            content.append("  ")
+            clipped_value = _clip(value, value_width)
+            content.append(clipped_value.ljust(value_width), style=value_style)
+            return content
+
+        def timeline_row(event: IngestProgressEvent) -> Text:
+            content = Text("  ")
+            stage = self._ingest_stage_label(event.stage)
+            content.append(
+                _clip(stage, stage_width).ljust(stage_width),
+                style=self._ingest_level_style(event.level),
+            )
+            content.append("  ")
+            message = _clip(
+                _redact_text(event.message, self.working_config), message_width
+            )
+            content.append(message.ljust(message_width))
+            content.append("  ")
+            progress = self._ingest_progress_plain(event, progress_width)
+            content.append(progress.ljust(progress_width), style="cyan")
+            return content
+
+        dashboard = Text()
+        dashboard.append(self._dashboard_border(width, title, border_style))
+        dashboard.append("\n")
+        current_title = Text(" " * max(0, (inner_width - len("Current")) // 2))
+        current_title.append("Current", style="italic")
+        dashboard.append(self._dashboard_line(width, current_title, border_style))
+        dashboard.append("\n")
+        dashboard.append(self._dashboard_line(width, Text(""), border_style))
+        dashboard.append("\n")
+        if current is None:
+            dashboard.append(
+                self._dashboard_line(
+                    width,
+                    row("Current", "Starting ingestion..."),
+                    border_style,
+                )
+            )
+            dashboard.append("\n")
+        else:
+            message = _redact_text(current.message, self.working_config)
+            rows = [
+                row("Stage", self._ingest_stage_label(current.stage)),
+                row("Current", message),
+            ]
+            progress = self._ingest_progress_plain(current, value_width)
+            if progress:
+                rows.append(row("Progress", progress, "cyan"))
+            if current.repo:
+                rows.append(
+                    row("Repository", _redact_text(current.repo, self.working_config))
+                )
+            if current.collection:
+                rows.append(row("Collection", current.collection))
+            for current_row in rows:
+                dashboard.append(self._dashboard_line(width, current_row, border_style))
+                dashboard.append("\n")
+
+        dashboard.append(self._dashboard_line(width, Text(""), border_style))
+        dashboard.append("\n")
+        header = Text("  ")
+        header.append("Stage".ljust(stage_width), style="bold cyan")
+        header.append("  ")
+        header.append("Message".ljust(message_width), style="bold cyan")
+        header.append("  ")
+        header.append("Progress".ljust(progress_width), style="bold cyan")
+        dashboard.append(self._dashboard_line(width, header, border_style))
+        dashboard.append("\n")
+        separator = Text("  ")
+        separator.append("─" * content_width, style="dim")
+        dashboard.append(self._dashboard_line(width, separator, border_style))
+        dashboard.append("\n")
+        for event in events:
+            dashboard.append(
+                self._dashboard_line(width, timeline_row(event), border_style)
+            )
+            dashboard.append("\n")
+        dashboard.append(self._dashboard_border(width, "", border_style))
+        return dashboard
+
+    def _render_ingest_dashboard(
+        self,
+        *,
+        title: str = "Ingestion in progress",
+        border_style: str = "yellow",
+        force: bool = False,
+    ) -> None:
+        """Render live ingestion progress in the main output pane."""
+        now = time.monotonic()
+        if (
+            not force
+            and now - self.ingest_last_render_at < INGEST_RENDER_INTERVAL_SECONDS
+        ):
+            return
+        self.ingest_last_render_at = now
+
+        dashboard_width = self._operation_render_width("Ingestion")
+        self._write_main_fixed(
+            self._ingest_dashboard_text(
+                title=title,
+                border_style=border_style,
+                width=dashboard_width,
+            ),
+            dashboard_width,
+        )
+
+    def _record_ingest_progress(
+        self, event: IngestProgressEvent, force: bool = False
+    ) -> None:
+        """Record an ingestion progress event and refresh the dashboard."""
+        redacted = IngestProgressEvent(
+            stage=event.stage,
+            message=_redact_text(event.message, self.working_config),
+            current=event.current,
+            total=event.total,
+            percent=event.percent,
+            level=event.level,
+            repo=_redact_text(event.repo, self.working_config) if event.repo else None,
+            collection=event.collection,
+        )
+        self.ingest_progress_events.append(redacted)
+        self.ingest_progress_events = self.ingest_progress_events[
+            -MAX_INGEST_PROGRESS_EVENTS:
+        ]
+        phase = self._ingest_stage_label(redacted.stage)
+        phases = list(dict.fromkeys([*self.operation_phases, phase]))
+        self.operation_title = "Ingestion"
+        self.operation_step = phase
+        self.operation_phases = phases
+        self._render_ingest_dashboard(
+            title="Ingestion in progress",
+            border_style="yellow",
+            force=force or redacted.level in {"warning", "error", "success"},
+        )
+        self._tick_activity()
+
+    def _ingest_progress_callback(self):
+        """Return a worker-thread callback for structured ingestion progress."""
+
+        def update(event: IngestProgressEvent) -> None:
+            if self.ingest_stop_event.is_set() and event.stage != "stopped":
+                raise _ingest_cancelled("Ingestion stopped from the TUI")
+
+            pause_notice_sent = False
+            while not self.ingest_pause_event.is_set():
+                if self.ingest_stop_event.is_set():
+                    raise _ingest_cancelled("Ingestion stopped from the TUI")
+                if not pause_notice_sent:
+                    self.call_from_thread(
+                        self._record_ingest_progress,
+                        IngestProgressEvent(
+                            stage="control",
+                            message="Ingestion paused. Use `/resume` or `/stop`.",
+                            level="warning",
+                        ),
+                        True,
+                    )
+                    pause_notice_sent = True
+                time.sleep(0.25)
+
+            if self.ingest_stop_event.is_set() and event.stage != "stopped":
+                raise _ingest_cancelled("Ingestion stopped from the TUI")
+
+            self.call_from_thread(
+                self._record_ingest_progress,
+                event,
+                event.level in {"warning", "error", "success"},
+            )
+
+        return update
+
+    def _pause_ingestion(self) -> None:
+        """Pause a running ingestion at the next progress checkpoint."""
+        if not self.operation_running or self.operation_title != "Ingestion":
+            self._set_activity(["No running ingestion to pause."])
+            return
+        self.ingest_pause_event.clear()
+        self._record_ingest_progress(
+            IngestProgressEvent(
+                stage="control",
+                message="Pause requested. Ingestion will pause at the next checkpoint.",
+                level="warning",
+            ),
+            force=True,
+        )
+
+    def _resume_ingestion(self) -> None:
+        """Resume a paused ingestion."""
+        if not self.operation_running or self.operation_title != "Ingestion":
+            self._set_activity(["No paused ingestion to resume."])
+            return
+        self.ingest_pause_event.set()
+        self._record_ingest_progress(
+            IngestProgressEvent(
+                stage="control",
+                message="Ingestion resumed.",
+                level="success",
+            ),
+            force=True,
+        )
+
+    def _stop_ingestion(self) -> None:
+        """Stop ingestion without closing the TUI."""
+        if not self.operation_running or self.operation_title != "Ingestion":
+            self._set_activity(["No running ingestion to stop."])
+            return
+        self.ingest_stop_event.set()
+        self.ingest_pause_event.set()
+        self._record_ingest_progress(
+            IngestProgressEvent(
+                stage="stopped",
+                message="Stop requested. Waiting for the current checkpoint to finish.",
+                level="warning",
+            ),
+            force=True,
+        )
 
     def _render_help(self) -> None:
         """Render TUI command help without appending another menu block."""
@@ -1486,9 +2097,7 @@ class GithubQdrantSyncApp(App[None]):
         table.clear(columns=True)
         table.add_columns("#", "Score", "Collection", "Source", "Snippet")
 
-    def _collection_status_for(
-        self, collection_name: str
-    ) -> Optional[CollectionCompatibility]:
+    def _collection_status_for(self, collection_name: str) -> Optional[Any]:
         """Return the most recent compatibility status for a collection."""
         for status in self.collection_statuses:
             if status.collection_name == collection_name:
@@ -1513,7 +2122,7 @@ class GithubQdrantSyncApp(App[None]):
                 _clip(status.reason if status else target.branch or "default", 44),
             )
 
-    def _update_sources(self, response: QueryResponse) -> None:
+    def _update_sources(self, response: Any) -> None:
         """Render search or ask source hits in the source table."""
         self._reset_sources_table()
         table = self.query_one("#sources", DataTable)
@@ -1685,9 +2294,7 @@ class GithubQdrantSyncApp(App[None]):
             ],
         )
 
-    def _render_query_response(
-        self, response: QueryResponse, phases: List[str]
-    ) -> None:
+    def _render_query_response(self, response: Any, phases: List[str]) -> None:
         """Render a retrieval response in the main output pane."""
         self.collection_statuses = response.collection_statuses
         self._refresh_collections_table()
@@ -1744,9 +2351,7 @@ class GithubQdrantSyncApp(App[None]):
         )
         main.write(results)
 
-    def _render_answer_response(
-        self, response: AnswerResponse, phases: List[str]
-    ) -> None:
+    def _render_answer_response(self, response: Any, phases: List[str]) -> None:
         """Render a generated answer and source metadata."""
         self.collection_statuses = response.retrieval.collection_statuses
         self._refresh_collections_table()
@@ -1887,7 +2492,7 @@ class GithubQdrantSyncApp(App[None]):
         try:
             self._load_config_state(config_path)
             self.collection = None
-            self.collection_targets = resolve_collection_targets(
+            self.collection_targets = _resolve_collection_targets(
                 self.working_config,
                 collection=None,
                 repo_list=str(self.repo_list) if self.repo_list else None,
@@ -2594,8 +3199,21 @@ class GithubQdrantSyncApp(App[None]):
             "Ingestion",
             "Running ingestion",
             "Processing repository content into Qdrant.",
+            allow_commands=True,
         ):
             return
+        self.ingest_progress_events = []
+        self.ingest_last_render_at = 0.0
+        self.ingest_dashboard_width = None
+        self.ingest_stop_event.clear()
+        self.ingest_pause_event.set()
+        self._record_ingest_progress(
+            IngestProgressEvent(
+                stage="initialize",
+                message="Starting ingestion. Use `/pause`, `/resume`, or `/stop`.",
+            ),
+            force=True,
+        )
         self.active_worker = self.run_worker(
             partial(self._ingest_worker, repo_url, repo_list),
             name="ingest",
@@ -2618,8 +3236,12 @@ class GithubQdrantSyncApp(App[None]):
                 config_path=config_path,
                 repo_url=repo_url,
                 repo_list=repo_list,
+                progress=self._ingest_progress_callback(),
             )
-        if exit_code == 0:
+        if self.ingest_stop_event.is_set() or exit_code == 130:
+            message = "Ingestion stopped."
+            style = "yellow"
+        elif exit_code == 0:
             message = "Ingestion completed successfully."
             style = "green"
         else:
@@ -2630,16 +3252,21 @@ class GithubQdrantSyncApp(App[None]):
 
     def _render_ingest_result(self, message: str, style: str) -> None:
         """Render the final ingestion result."""
-        main = self.query_one("#main", RichLog)
-        main.clear()
-        main.write(
-            Panel(
-                message,
-                title="Repository Ingestion",
-                border_style=style,
-                box=box.ROUNDED,
-                safe_box=True,
-            )
+        level = (
+            "success"
+            if style == "green"
+            else "warning"
+            if style == "yellow"
+            else "error"
+        )
+        self._record_ingest_progress(
+            IngestProgressEvent(stage="complete", message=message, level=level),
+            force=True,
+        )
+        self._render_ingest_dashboard(
+            title="Repository Ingestion",
+            border_style=style,
+            force=True,
         )
 
 

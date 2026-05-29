@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
 
 import typer
 import yaml
@@ -22,43 +22,172 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+if TYPE_CHECKING:
+    from rag_retrieval import CollectionCompatibility, CollectionTarget, QueryResponse
+
 MODULE_DIR = Path(__file__).resolve().parent
 if sys.path[0] != str(MODULE_DIR):
     sys.path.insert(0, str(MODULE_DIR))
 
-# pylint: disable=wrong-import-position
-from github_to_qdrant import ConfigLoader, GitHubToQdrantProcessor, run_ingest  # noqa: E402
-from github_qdrant_quality import (  # noqa: E402
-    benchmark_table,
-    benchmark_to_dict,
-    doctor_table,
-    doctor_to_dict,
-    improve_table,
-    improve_to_dict,
-    resolve_benchmark_cases,
-    run_benchmark,
-    run_doctor,
-    run_improve,
-)
-from rag_retrieval import (  # noqa: E402
-    CollectionCompatibility,
-    CollectionTarget,
-    QueryResponse,
-    execute_query,
-    inspect_collection_targets,
-    load_repository_targets,
-    redact_metadata,
-    resolve_collection_targets,
-    run_query,
-)
-# pylint: enable=wrong-import-position
+# Heavy backend modules are imported lazily so bare `github-qdrant-sync` can
+# open the Textual UI without paying LangChain/Qdrant/PDF import costs first.
+
+
+class ConfigLoader:  # pylint: disable=too-few-public-methods
+    """Lazy proxy for github_to_qdrant.ConfigLoader."""
+
+    __module__ = "github_to_qdrant"
+
+    @staticmethod
+    def load_config(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        from github_to_qdrant import ConfigLoader as Loader
+
+        return Loader.load_config(*args, **kwargs)
+
+    @staticmethod
+    def load_env_for_config(*args: Any, **kwargs: Any) -> None:
+        from github_to_qdrant import ConfigLoader as Loader
+
+        return Loader.load_env_for_config(*args, **kwargs)
+
+    @staticmethod
+    def _resolve_env_vars(*args: Any, **kwargs: Any) -> Any:
+        from github_to_qdrant import ConfigLoader as Loader
+
+        return Loader._resolve_env_vars(*args, **kwargs)  # pylint: disable=protected-access
+
+
+def GitHubToQdrantProcessor(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for the ingestion processor."""
+    from github_to_qdrant import GitHubToQdrantProcessor as Processor
+
+    return Processor(*args, **kwargs)
+
+
+def run_ingest(*args: Any, **kwargs: Any) -> int:
+    """Lazy proxy for ingestion execution."""
+    from github_to_qdrant import run_ingest as ingest
+
+    return ingest(*args, **kwargs)
+
+
+def execute_query(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for retrieval query execution."""
+    from rag_retrieval import execute_query as execute
+
+    return execute(*args, **kwargs)
+
+
+def run_query(*args: Any, **kwargs: Any) -> int:
+    """Lazy proxy for retrieval CLI execution."""
+    from rag_retrieval import run_query as query_runner
+
+    return query_runner(*args, **kwargs)
+
+
+def inspect_collection_targets(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for collection compatibility checks."""
+    from rag_retrieval import inspect_collection_targets as inspect
+
+    return inspect(*args, **kwargs)
+
+
+def load_repository_targets(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for repo-list collection loading."""
+    from rag_retrieval import load_repository_targets as load_targets
+
+    return load_targets(*args, **kwargs)
+
+
+def resolve_collection_targets(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for collection target resolution."""
+    from rag_retrieval import resolve_collection_targets as resolve
+
+    return resolve(*args, **kwargs)
+
+
+def redact_metadata(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for metadata redaction."""
+    from rag_retrieval import redact_metadata as redact
+
+    return redact(*args, **kwargs)
+
+
+def run_doctor(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for doctor checks."""
+    from github_qdrant_quality import run_doctor as doctor
+
+    return doctor(*args, **kwargs)
+
+
+def run_benchmark(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for benchmark execution."""
+    from github_qdrant_quality import run_benchmark as benchmark
+
+    return benchmark(*args, **kwargs)
+
+
+def run_improve(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for improvement analysis."""
+    from github_qdrant_quality import run_improve as improve
+
+    return improve(*args, **kwargs)
+
+
+def resolve_benchmark_cases(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy for benchmark case resolution."""
+    from github_qdrant_quality import resolve_benchmark_cases as resolve
+
+    return resolve(*args, **kwargs)
+
+
+def doctor_table(*args: Any, **kwargs: Any) -> Table:
+    """Lazy proxy for doctor table rendering."""
+    from github_qdrant_quality import doctor_table as render
+
+    return render(*args, **kwargs)
+
+
+def benchmark_table(*args: Any, **kwargs: Any) -> Table:
+    """Lazy proxy for benchmark table rendering."""
+    from github_qdrant_quality import benchmark_table as render
+
+    return render(*args, **kwargs)
+
+
+def improve_table(*args: Any, **kwargs: Any) -> Table:
+    """Lazy proxy for improvement table rendering."""
+    from github_qdrant_quality import improve_table as render
+
+    return render(*args, **kwargs)
+
+
+def doctor_to_dict(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Lazy proxy for doctor JSON rendering."""
+    from github_qdrant_quality import doctor_to_dict as convert
+
+    return convert(*args, **kwargs)
+
+
+def benchmark_to_dict(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Lazy proxy for benchmark JSON rendering."""
+    from github_qdrant_quality import benchmark_to_dict as convert
+
+    return convert(*args, **kwargs)
+
+
+def improve_to_dict(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Lazy proxy for improve JSON rendering."""
+    from github_qdrant_quality import improve_to_dict as convert
+
+    return convert(*args, **kwargs)
 
 
 console = Console()
 PROJECT_NAME = "GithubQdrant-Sync"
 PROJECT_REPO_LABEL = "maholick/github-qdrant-sync"
 PROJECT_REPO_URL = "https://github.com/maholick/github-qdrant-sync"
-FALLBACK_VERSION = "0.5.0"
+FALLBACK_VERSION = "0.5.1"
 DEFAULT_MISTRAL_CHAT_MODEL = "mistral-large-2512"
 DEFAULT_AZURE_CHAT_MODEL = "${AZURE_OPENAI_CHAT_DEPLOYMENT}"
 DEFAULT_ANSWER_SYSTEM_PROMPT = (
